@@ -35,7 +35,7 @@ A cross-platform desktop application for analyzing Garmin running fit files. Fea
 
 Don't want to mess with Python code? No problem.
 
-1. **[Click here to go to the Releases page](https://github.com/YOUR_USERNAME/garmin-fit-analyzer/releases).**
+1. **[Click here to go to the Releases page](https://github.com/themeaningofmeaning/garmin-fit-analyzer/releases).**
 2. **Mac Users:** Download `GarminAnalyzer.dmg`.
 3. **Windows Users:** Download `GarminAnalyzer.zip`, unzip it, and run the app inside.
 
@@ -45,7 +45,7 @@ If you want to modify the code or contribute:
 
 ```bash
 # Clone the repository
-git clone [https://github.com/YOUR_USERNAME/garmin-fit-analyzer.git](https://github.com/YOUR_USERNAME/garmin-fit-analyzer.git)
+git clone [https://github.com/themeaningofmeaning/garmin-fit-analyzer.git](https://github.com/themeaningofmeaning/garmin-fit-analyzer.git)
 cd garmin-fit-analyzer
 
 # Create virtual environment (recommended)
