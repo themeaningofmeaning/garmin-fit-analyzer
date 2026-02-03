@@ -8,16 +8,18 @@ A cross-platform desktop application for analyzing Garmin running fit files. Fea
 ## ✨ Features
 
 - 📁 **Folder Selection** - Pick any folder containing `.fit` files
+- 📉 **Trend Analysis** - Visualizes Aerobic Decoupling and Form metrics over time.
 - 🏃 **Running Metrics**:
   - Grade Adjusted Pace (GAP)
   - Heart Rate Decoupling
   - Form Analysis (Ground Contact Time)
   - Cadence & Power
   - Elevation Gain
-- 📊 **CSV Export** - Export all metrics to spreadsheet-compatible CSV
 - 📋 **Copy to Clipboard** - One-click copy for pasting into Claude/GPT/Gemini
+- 📊 **CSV Export** - [optional] Export all metrics to spreadsheet-compatible CSV
+- 📋 **LLM Ready** - One-click copy for pasting a text report optimized for ChatGPT/Claude/Gemini.
+- 📦 **Standalone Executables** - No Python installation required for end users.
 - 🔄 **Cross-Platform** - Works on Windows and macOS
-- 📦 **Standalone Executables** - No Python installation required for end users
 
 ## 📸 Screenshots
 
@@ -29,11 +31,21 @@ A cross-platform desktop application for analyzing Garmin running fit files. Fea
 
 ## 🚀 Installation
 
-### Option 1: Run from Source (Requires Python)
+### Option 1: Download the App (Easiest)
+
+Don't want to mess with Python code? No problem.
+
+1. **[Click here to go to the Releases page](https://github.com/YOUR_USERNAME/garmin-fit-analyzer/releases).**
+2. **Mac Users:** Download `GarminAnalyzer.dmg`.
+3. **Windows Users:** Download `GarminAnalyzer.zip`, unzip it, and run the app inside.
+
+### Option 2: Run from Source (For Developers)
+
+If you want to modify the code or contribute:
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/garmin-fit-analyzer.git
+git clone [https://github.com/YOUR_USERNAME/garmin-fit-analyzer.git](https://github.com/YOUR_USERNAME/garmin-fit-analyzer.git)
 cd garmin-fit-analyzer
 
 # Create virtual environment (recommended)
@@ -45,40 +57,24 @@ source venv/bin/activate  # On macOS/Linux
 pip install -r requirements.txt
 
 # Run the application
-python -m garmin_analyzer
+python -m src.garmin_analyzer.gui
 ```
-
-### Option 2: Download Executable
-
-Pre-built executables for Windows and macOS are available on the [Releases page](https://github.com/YOUR_USERNAME/garmin-fit-analyzer/releases).
-
-- **Windows**: Download `GarminAnalyzer.exe`
-- **macOS**: Download `GarminAnalyzer.dmg` or `GarminAnalyzer.app.zip`
 
 ## Building Executables
 
 ### For macOS
-
+Run the build script to create a .dmg installer:
 ```bash
-# Install py2app
-pip install py2app
-
-# Build the application
-python setup.py py2app
-
-# Output will be in dist/GarminAnalyzer.app
+./build_mac.sh
+# Output: dist/GarminAnalyzer.dmg
 ```
 
 ### For Windows
-
+Run the batch file to build the application:
 ```bash
-# Install PyInstaller
-pip install pyinstaller
-
-# Build executable
-pyinstaller --onefile --windowed --name GarminAnalyzer src/garmin_analyzer/gui.py
-
-# Output will be in dist/GarminAnalyzer.exe
+build_windows.bat
+# Output: dist/GarminAnalyzer
+# Note: You must manually zip this folder to share it.
 ```
 
 ## What the Metrics Mean

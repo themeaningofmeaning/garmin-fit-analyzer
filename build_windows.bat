@@ -16,4 +16,7 @@ python -m PyInstaller --onedir --windowed --name GarminAnalyzer ^
 
 echo.
 echo ✅ Build complete! 📦 Output: dist\GarminAnalyzer
+echo 📦 Zipping into GarminAnalyzer.zip...
+powershell Compress-Archive -Path "dist\GarminAnalyzer" -DestinationPath "dist\GarminAnalyzer.zip" -Force
+echo ✅ Zip complete!
 pause
