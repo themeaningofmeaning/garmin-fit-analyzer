@@ -1,6 +1,8 @@
 # Garmin FIT Analyzer 🏃‍♂️💨
 
-A cross-platform desktop application for analyzing Garmin FIT files for advanced running data. Features a graphical interface for selecting a folder and processing multiple FIT files at once.  I'd like this to be a project that benefits us all to analyze performance metrics for serious runners.  Like our running, it's a work in progress so your help, suggestions, support, and positive vibes will benefit everyone.
+Garmin FIT Analyzer is a cross-platform desktop application designed to unlock advanced running metrics hidden by standard platforms. It features a modern GUI for batch processing files and generating data specifically optimized for analysis by your LLM of choice (ChatGPT, Claude, Gemini, whatever).
+
+This project is built for serious runners who want deeper insights into efficiency and form.  It's not garbage data - if you feed this into your homerolled LLM running coach, it will help you can tailor your form (cadence), avoid or heal from injuries, and maximize a training plan based on your own body's every-changing capabilities (do hill spints on tuesday, rest tomorrow to lock in gains, do a pace run on Friday, etc.).  Like our training, this tool is a work in progress so contributions, suggestions, and positive vibes will help us all.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
