@@ -86,6 +86,41 @@ build_windows.bat
 | **Ground Contact Time** | Time foot stays on ground | 200-300ms typical |
 | **Cadence** | Steps per minute | 170-180 spm optimal |
 
+## LLM Integration
+
+The output is designed to be easily copy-pasted into LLMs like Claude, ChatGPT, or Gemini for deeper analysis. Each run report includes:
+
+- **Stats**: Distance, pace, GAP
+- **Effort**: Moving/rest time, work/rest ratio
+- **Climb**: Elevation gain
+- **Metrics**: HR, cadence, power
+- **Engine**: HR decoupling percentage with interpretation
+- **Form**: Ground contact time change
+
+### 🧠 Pro Tip: The "Coach-Level" Analysis Stack
+
+For the most powerful insights, give the LLM the full picture by combining three data sources. This allows the AI to distinguish between a "bad day" and a "training trend."
+
+**1. The Macro (History)**
+* **Source:** Garmin Connect Web $\rightarrow$ Activities List $\rightarrow$ Export CSV.
+* **Why:** Provides your historical baseline. It lets the LLM see if your resting HR is rising or if your stride length has been shortening over the last month.
+
+**2. The Micro (Mechanics)**
+* **Source:** **Garmin Analyzer App** $\rightarrow$ "Copy for LLM".
+* **Why:** Provides the deep-dive internal metrics of *today's* run that Garmin hides (Aerobic Decoupling, Form Decay, Efficiency Factor).
+
+**3. The Splits (Pacing)**
+* **Source:** Garmin Connect Web $\rightarrow$ Activity $\rightarrow$ Export Splits to CSV.
+* **Why:** Shows exactly *where* the breakdown happened (e.g., "Mile 18 was 30 seconds too fast, causing the drift in Mile 20").
+
+### 📋 Recommended Prompt Strategy
+> "I am providing three pieces of data:
+> 1. My **Activities Overview** (past 3 months of training).
+> 2. My **Splits** for today's run.
+> 3. The **Analyzer Report** for today's run (efficiency & decoupling).
+>
+> **Task:** Analyze today's performance in the context of my recent training load. Was the high cardiac drift caused by poor pacing (see Splits), or accumulated fatigue from the last 2 weeks (see Activities)?"
+
 ## Project Structure
 
 ```
@@ -103,17 +138,6 @@ garmin-fit-analyzer/
 ├── requirements.txt         # Dependencies
 └── README.md
 ```
-
-## LLM Integration
-
-The output is designed to be easily copy-pasted into LLMs like Claude, ChatGPT, or Gemini for deeper analysis. Each run report includes:
-
-- **Stats**: Distance, pace, GAP
-- **Effort**: Moving/rest time, work/rest ratio
-- **Climb**: Elevation gain
-- **Metrics**: HR, cadence, power
-- **Engine**: HR decoupling percentage with interpretation
-- **Form**: Ground contact time change
 
 ## Dependencies
 
