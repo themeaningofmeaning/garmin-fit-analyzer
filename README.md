@@ -1,6 +1,6 @@
 # Garmin FIT Analyzer 🏃‍♂️💨
 
-A cross-platform desktop application for analyzing Garmin FIT files for advanced running data. Features a graphical interface for selecting folders and processing multiple files at once.  I intend this to be a free and open source project to analyze performance metrics for serious runners.  Like our running, it's a work in progress so your help, suggestions, support, and positive vibes will benefit everyone.
+A cross-platform desktop application for analyzing Garmin FIT files for advanced running data. Features a graphical interface for selecting a folder and processing multiple FIT files at once.  I'd like this to be a project that benefits us all to analyze performance metrics for serious runners.  Like our running, it's a work in progress so your help, suggestions, support, and positive vibes will benefit everyone.
 
 ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS-blue)
 ![Python](https://img.shields.io/badge/python-3.8+-green)
