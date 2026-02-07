@@ -1,11 +1,12 @@
 """
 Garmin FIT File Analyzer - Core Analysis Engine
-Upgraded: Added Real-Time Progress Tracking via callback.
+Upgraded: Added HRR (Heart Rate Recovery) Analysis.
 """
 
 import fitparse
 import pandas as pd
 import numpy as np
+from scipy.signal import find_peaks  # 🆕 For HRR detection
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 import os
@@ -20,11 +21,9 @@ def minetti_cost_of_running(grade):
     return cost
 
 class FitAnalyzer:
-    """Analyzes Garmin FIT files and extracts advanced running dynamics."""
-    
     def __init__(self, output_callback=None, progress_callback=None):
         self.output_callback = output_callback or self._default_output
-        self.progress_callback = progress_callback # Hook for GUI progress bar
+        self.progress_callback = progress_callback
     
     def _default_output(self, text: str):
         print(text)
@@ -47,7 +46,6 @@ class FitAnalyzer:
             if start_time is None and r.get('timestamp'):
                 start_time = r.get('timestamp')
 
-            # FIX: Garmin stores running cadence as RPM (one foot). We want SPM (steps).
             raw_cadence = r.get('cadence')
             cadence_spm = raw_cadence * 2 if raw_cadence else None
 
@@ -72,7 +70,6 @@ class FitAnalyzer:
         if df.empty or 'speed' not in df.columns:
             return None
         
-        # Ensure numeric types
         cols_to_numeric = ['hr', 'cadence', 'speed', 'dist', 'alt', 'power', 'temp', 'resp']
         for col in cols_to_numeric:
             if col in df.columns:
@@ -115,7 +112,10 @@ class FitAnalyzer:
                 avg_gap_pace_str = f"{int(gap_pace_min)}:{int((gap_pace_min % 1) * 60):02d}"
                 avg_gap_speed_m_min = avg_gap_speed * 60
 
-        # --- 3. DYNAMICS ---
+        # --- 3. HRR Analysis (New Feature) ---
+        hrr_list = self._calculate_hrr(df) # Returns list like [35, 32, 20]
+
+        # --- 4. DYNAMICS ---
         v_ratio = 0
         if 'v_osc' in df_active.columns and 'stride_len' in df_active.columns:
             valid_dynamics = df_active[(df_active['v_osc'] > 0) & (df_active['stride_len'] > 0)]
@@ -124,7 +124,7 @@ class FitAnalyzer:
 
         gct_bal_val = df_active['gct_bal'].mean() if 'gct_bal' in df_active.columns else 0
 
-        # --- 4. ENGINE ---
+        # --- 5. ENGINE ---
         df_active['ef_metric'] = df_active['speed'] / df_active['hr']
         mid = len(df_active) // 2
         ef1, ef2 = df_active.iloc[:mid]['ef_metric'].mean(), df_active.iloc[mid:]['ef_metric'].mean()
@@ -137,7 +137,7 @@ class FitAnalyzer:
 
         gct_change = (df_active.iloc[mid:]['gct'].mean() - df_active.iloc[:mid]['gct'].mean()) if 'gct' in df_active.columns else 0
 
-        # --- 5. AVERAGES ---
+        # --- 6. AVERAGES ---
         avg_temp = df_active['temp'].mean() if 'temp' in df_active.columns else 0
         avg_resp = df_active['resp'].mean() if 'resp' in df_active.columns else 0
         avg_power = df_active['power'].mean() if 'power' in df_active.columns else 0
@@ -161,6 +161,7 @@ class FitAnalyzer:
             'decoupling': round(decoupling, 2),
             'avg_temp': round(avg_temp, 1) if avg_temp else 0,
             'avg_resp': round(avg_resp, 1) if avg_resp else 0,
+            'hrr_list': hrr_list,  # 🆕 The raw data for LLM
             'elevation_ft': int(total_climb_ft),
             'moving_time_min': round(moving_time_min, 1),
             'rest_time_min': round(rest_time_min, 1),
@@ -169,16 +170,46 @@ class FitAnalyzer:
             'gct_balance': round(gct_bal_val, 1)
         }
 
+    def _calculate_hrr(self, df: pd.DataFrame) -> List[int]:
+        """
+        Calculates Heart Rate Recovery (HRR) at 60 seconds after peaks.
+        Logic: Find HR peaks (end of intervals) -> Check HR 60s later -> Delta.
+        """
+        if 'hr' not in df.columns or df['hr'].isnull().all():
+            return []
+
+        # Smooth HR to avoid noise peaks
+        hr_smooth = df['hr'].rolling(window=10, center=True).mean().fillna(df['hr'])
+        
+        # Find peaks: At least 140bpm, separated by 3 mins (approx interval gap)
+        # Assuming 1 record = 1 second usually.
+        peaks, _ = find_peaks(hr_smooth, height=140, distance=180)
+        
+        hrr_values = []
+        for p in peaks:
+            # Check 60s later (approx 60 records)
+            if p + 60 < len(df):
+                peak_hr = df['hr'].iloc[p]
+                recovery_hr = df['hr'].iloc[p + 60]
+                
+                # Logic: Is this actually a recovery? 
+                # If they kept running hard, HR won't drop much.
+                # HRR is only valid if they stopped or jogged.
+                # Threshold: Drop must be > 10bpm to count as a "Recovery Attempt"
+                delta = peak_hr - recovery_hr
+                if delta > 10:
+                    hrr_values.append(int(delta))
+        
+        return hrr_values
+
     def analyze_folder(self, folder_path: str):
         files = sorted([f for f in os.listdir(folder_path) if f.endswith('.fit')])
         total_files = len(files)
         results = []
         
         for i, f in enumerate(files):
-            # Report Progress (Current, Total)
             if self.progress_callback:
                 self.progress_callback(i + 1, total_files)
-                
             res = self.analyze_file(os.path.join(folder_path, f))
             if res: results.append(res)
             

@@ -4,7 +4,7 @@ from tkinter import filedialog, messagebox
 import threading
 import os
 import pandas as pd
-# NOTE: Absolute import (No dot!)
+# NOTE: Absolute import for the root folder structure
 from analyzer import FitAnalyzer
 
 # Set theme
@@ -63,20 +63,17 @@ class GarminAnalyzerApp(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("Garmin FIT Analyzer v2.2")
+        self.title("Garmin FIT Analyzer v2.3")
         self.geometry("1100x850")
         
-        # --- MAC OS FIX: Force Window to Front ---
         self.lift()
         self.focus_force()
         self.attributes('-topmost', True)
         self.after_idle(self.attributes, '-topmost', False)
-        # -----------------------------------------
 
         self.run_data = []
         self.df = None
 
-        # --- LAYOUT ---
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
@@ -120,7 +117,7 @@ class GarminAnalyzerApp(ctk.CTk):
         self.textbox = ctk.CTkTextbox(self.tab_report, font=("Consolas", 14))
         self.textbox.pack(fill="both", expand=True)
 
-        # --- WELCOME MESSAGE ---
+        # Welcome
         self.textbox.tag_config("center", justify="center")
         welcome_text = "\n\n\n👋 Welcome to Garmin Analyzer!\n\n1. Click '📂 Select Folder' on the left.\n2. Choose your folder of .FIT files.\n3. Watch the magic happen."
         self.textbox.insert("0.0", welcome_text, "center")
@@ -128,7 +125,6 @@ class GarminAnalyzerApp(ctk.CTk):
         # Tab 2: Graphs
         self.tab_graph = self.tabview.add("📈 Trend Analysis")
         
-        # Controls
         self.graph_controls = ctk.CTkFrame(self.tab_graph, fg_color="transparent", height=30)
         self.graph_controls.pack(fill="x", padx=5, pady=5)
         self.btn_info = ctk.CTkButton(self.graph_controls, text="❓ What do the dots mean?", command=self.open_guide, width=180, height=24, fg_color="#444", hover_color="#555")
@@ -210,6 +206,15 @@ class GarminAnalyzerApp(ctk.CTk):
         if folder_avg_ef > 0 and ef > folder_avg_ef: e_status = " (📈 Building Fitness)"
         elif folder_avg_ef > 0: e_status = " (📉 Below Average)"
 
+        # HRR Formatting (New)
+        hrr_list = d.get('hrr_list', [])
+        hrr_str = "--"
+        if hrr_list:
+            hrr_str = f"{hrr_list} bpm"
+            # Optional: Add a verdict if the drops are getting smaller
+            if len(hrr_list) > 2 and hrr_list[-1] < hrr_list[0] * 0.7:
+                hrr_str += " ⚠️ (Decaying recovery)"
+
         return f"""
 RUN: {d.get('date')} ({d.get('filename')})
 --------------------------------------------------
@@ -222,6 +227,7 @@ RUN: {d.get('date')} ({d.get('filename')})
 [2] EFFICIENCY & ENGINE
     Efficiency Factor (EF): {ef}{e_status} (Target: > 1.3)
     Aerobic Decoupling:     {decoupling}%{d_status}
+    HR Recovery (60s):      {hrr_str}
     Avg Power:              {safe_fmt(d.get('avg_power'), " W")}
 
 [3] INTERNAL LOAD (CONTEXT)
@@ -256,10 +262,10 @@ RUN: {d.get('date')} ({d.get('filename')})
         ax1.axhspan(-5, 5, color='#2CC985', alpha=0.15)
         ax1.text(dates.iloc[0], 0, " OPTIMAL STABILITY ZONE (Decoupling)", color='#2CC985', fontsize=8, va='center', fontweight='bold')
         
-        line1, = ax1.plot(dates, self.df['decoupling'], color='#ff4d4d', alpha=0.5, linewidth=1, label='Decoupling % (keep in green band)')
+        line1, = ax1.plot(dates, self.df['decoupling'], color='#ff4d4d', alpha=0.5, linewidth=1, label='Decoupling % (Keep in Green Band)')
         
         ax1b = ax1.twinx()
-        line2, = ax1b.plot(dates, self.df['efficiency_factor'], color='#2CC985', alpha=0.3, linestyle='--', label='Efficiency Factor (should trend up)')
+        line2, = ax1b.plot(dates, self.df['efficiency_factor'], color='#2CC985', alpha=0.3, linestyle='--', label='Efficiency Factor (Should Trend Up)')
         
         ef_mean = self.df['efficiency_factor'].mean()
         dot_colors = []
@@ -310,18 +316,65 @@ RUN: {d.get('date')} ({d.get('filename')})
                 'efficiency_factor', 'decoupling', 
                 'avg_hr', 'avg_resp', 'avg_temp', 
                 'avg_power', 'avg_cadence', 
+                'hrr_list', 
                 'v_ratio', 'gct_balance', 'gct_change', 
                 'elevation_ft', 'moving_time_min', 'rest_time_min'
             ]
             valid_cols = [c for c in cols if c in self.df.columns]
+            
+            # 1. Write the data (Standard CSV)
             self.df[valid_cols].to_csv(filename, index=False)
-            messagebox.showinfo("Success", "CSV Exported Successfully!")
+
+            # 2. Append the "Decoder Ring" for the LLM
+            # We add a few newlines so it doesn't mess up the last row of data
+            try:
+                with open(filename, "a", encoding="utf-8") as f:
+                    f.write("\n\n")
+                    f.write("# --- DATA DICTIONARY FOR AI ANALYSIS ---\n")
+                    f.write("# 1. hrr_list (Heart Rate Recovery): A Python list of HR drops (bpm) measured 60s after each peak effort.\n")
+                    f.write("#    Interpretation: [35, 30, 28] is stable/strong. [35, 15, 8] indicates autonomic failure (stop workout).\n")
+                    f.write("# 2. efficiency_factor (EF): Normalized Graded Speed (m/min) / HR. Higher is better. Used to track fitness trends.\n")
+                    f.write("# 3. decoupling: The % loss of efficiency from first half to second half. >5% = Fatigue/Drift.\n")
+                    f.write("# 4. v_ratio (Vertical Ratio): Vertical Oscillation / Stride Length. Lower is more efficient.\n")
+            except Exception as e:
+                print(f"Could not append context: {e}")
+
+            messagebox.showinfo("Success", "CSV Exported!")
 
     def copy_to_clipboard(self):
-        text = self.textbox.get("0.0", "end")
+        # 1. Get the visible report
+        report_text = self.textbox.get("0.0", "end")
+        
+        # 2. Add the "LLM Decoder Ring" (Hidden Context)
+        llm_context = """
+*** CONTEXT FOR AI COACH ***
+The metrics above are engineered from Garmin .FIT files. Use this dictionary to interpret them:
+
+1. EFFICIENCY FACTOR (EF): 
+   - Formula: Normalized Graded Speed (m/min) / Heart Rate. 
+   - Meaning: The "Miles Per Gallon" of the runner. 
+   - Trend: Higher is better. A rising EF at the same HR means fitness is improving.
+
+2. AEROBIC DECOUPLING (Pw:Hr):
+   - Meaning: The percentage loss of efficiency from the first half of the run to the second.
+   - Thresholds: < 5% is Aerobic Stability (Good). > 5% indicates cardiac drift/fatigue.
+
+3. HR RECOVERY (60s):
+   - Data: A list of heart rate drops (bpm) measured 60 seconds after detected peak efforts (intervals or hills).
+   - Interpretation: [30, 28, 29] is excellent/stable. [30, 15, 8] indicates the autonomic nervous system is failing (terminate workout).
+
+4. FORM METRICS:
+   - Vertical Ratio: Vertical oscillation / Stride length. Lower is more efficient.
+   - GCT Balance: Ground Contact Time L/R. 50.0% is perfect symmetry.
+"""
+        # 3. Combine and Copy
+        final_text = report_text + "\n" + llm_context
+        
         self.clipboard_clear()
-        self.clipboard_append(text)
-        self.btn_copy.configure(text="✅ Copied!", fg_color="white")
+        self.clipboard_append(final_text)
+        
+        # 4. Feedback
+        self.btn_copy.configure(text="✅ Copied w/ Context!", fg_color="white")
         self.after(2000, lambda: self.btn_copy.configure(text="📋 Copy for LLM", fg_color="#2CC985"))
         
     def open_guide(self):
