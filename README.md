@@ -34,11 +34,11 @@ This project is built for serious runners who want deeper insights into efficien
 ## 📸 Screenshots
 
 ### Interactive Training Trends
-![Dashboard View](assets/dashboard.png)
+![Dashboard View](assets/graph.png)
 *Zoom-responsive charts with live trend analysis and performance categorization*
 
 ### Detailed Run Reports
-![Graph View](assets/graph.png)
+![Graph View](assets/dashboard.png)
 *Professional cards with HR Recovery, Efficiency Factor, and Aerobic Decoupling*
 
 ### 📈 How to Read the Chart
