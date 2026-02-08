@@ -45,9 +45,9 @@ This project is built for serious runners who want deeper insights into efficien
 
 The trend chart uses a smart 4-color system to categorize the **Quality** of every run based on two key metrics: Efficiency Factor (your speed relative to heart rate) and Aerobic Decoupling (cardiac drift):
 
-- � **Race Ready (Fast & Stable):** High EF + Low Decoupling (<5%). You were fast and your cardiovascular system stayed efficient. Peak performance.
+- 🟢 **Race Ready (Fast & Stable):** High EF + Low Decoupling (<5%). You were fast and your cardiovascular system stayed efficient. Peak performance.
 - 🟡 **Base Maintenance (Slow & Stable):** Low EF + Low Decoupling (<5%). A controlled easy run building aerobic base without fatigue.
-- � **Expensive Speed (Fast but Drifted):** High EF + High Decoupling (>5%). You ran fast, but your heart rate drifted significantly. Unsustainable effort.
+- 🟠 **Expensive Speed (Fast but Drifted):** High EF + High Decoupling (>5%). You ran fast, but your heart rate drifted significantly. Unsustainable effort.
 - 🔴 **Struggling (Slow & Drifted):** Low EF + High Decoupling (>5%). You were slow *and* your HR drifted. Sign of accumulated fatigue or poor conditions.
 
 **Interactive Features:**
