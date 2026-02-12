@@ -18,249 +18,9 @@ from plotly.subplots import make_subplots
 from nicegui import ui, run
 
 # Local imports
-from analyzer import FitAnalyzer
+from analyzer import FitAnalyzer, analyze_form, classify_split
+from db import DatabaseManager, calculate_file_hash
 
-
-# --- DATABASE MANAGER (Preserved from gui.py) ---
-class DatabaseManager:
-    def __init__(self, db_path='runner_stats.db'):
-        self.db_path = db_path
-        self.create_tables()
-
-    def get_connection(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        return conn
-
-    def create_tables(self):
-        with self.get_connection() as conn:
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS activities (
-                    hash TEXT PRIMARY KEY,
-                    filename TEXT,
-                    date TEXT,
-                    json_data TEXT,
-                    session_id INTEGER,
-                    file_path TEXT
-                )
-            ''')
-
-            # Migration: Add file_path column if it doesn't exist
-            try:
-                conn.execute("SELECT file_path FROM activities LIMIT 1")
-            except sqlite3.OperationalError:
-                # Column doesn't exist, add it
-                print("Migrating database: Adding file_path column...")
-                conn.execute("ALTER TABLE activities ADD COLUMN file_path TEXT")
-                print("Migration complete!")
-
-
-
-    def activity_exists(self, file_hash):
-        with self.get_connection() as conn:
-            cursor = conn.execute("SELECT 1 FROM activities WHERE hash = ?", (file_hash,))
-            return cursor.fetchone() is not None
-
-    def insert_activity(self, activity_data, file_hash, session_id, file_path=None):
-        json_str = json.dumps(activity_data, default=str)
-        with self.get_connection() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO activities (hash, filename, date, json_data, session_id, file_path) VALUES (?, ?, ?, ?, ?, ?)",
-                (file_hash, activity_data.get('filename'), activity_data.get('date'), json_str, session_id, file_path)
-            )
-
-            
-    def delete_activity(self, file_hash):
-        with self.get_connection() as conn:
-            conn.execute("DELETE FROM activities WHERE hash = ?", (file_hash,))
-
-    def get_count(self):
-        with self.get_connection() as conn:
-            return conn.execute("SELECT COUNT(*) FROM activities").fetchone()[0]
-
-    def get_activities(self, timeframe="All Time", current_session_id=None):
-        query = "SELECT json_data, hash FROM activities"
-        params = []
-        
-        if timeframe == "Last Import" and current_session_id:
-            query += " WHERE session_id = ?"
-            params.append(current_session_id)
-        elif timeframe == "Last 30 Days":
-            date_Limit = (datetime.now() - pd.Timedelta(days=30)).strftime("%Y-%m-%d")
-            query += " WHERE date >= ?"
-            params.append(date_Limit)
-        elif timeframe == "Last 90 Days":
-            date_Limit = (datetime.now() - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
-            query += " WHERE date >= ?"
-            params.append(date_Limit)
-        elif timeframe == "This Year":
-            current_year = datetime.now().year
-            query += " WHERE date >= ?"
-            params.append(f"{current_year}-01-01")
-            
-        query += " ORDER BY date DESC"
-        
-        with self.get_connection() as conn:
-            rows = conn.execute(query, params).fetchall()
-            results = []
-            for row in rows:
-                d = json.loads(row[0])
-                d['db_hash'] = row[1]
-                results.append(d)
-            return results
-    def get_activity_by_hash(self, file_hash):
-        """Get activity data by hash."""
-        with self.get_connection() as conn:
-            row = conn.execute(
-                "SELECT json_data, file_path FROM activities WHERE hash = ?",
-                (file_hash,)
-            ).fetchone()
-            if row:
-                activity = json.loads(row[0])
-                activity['file_path'] = row[1]
-                activity['hash'] = file_hash
-                return activity
-            return None
-
-
-
-# --- HELPER: FILE HASHING (Preserved from gui.py) ---
-def calculate_file_hash(filepath):
-    """Calculate SHA-256 hash of a file for deduplication."""
-    hasher = hashlib.sha256()
-    with open(filepath, 'rb') as f:
-        buf = f.read(65536)
-        while len(buf) > 0:
-            hasher.update(buf)
-            buf = f.read(65536)
-    return hasher.hexdigest()
-
-# --- HELPER: FORM ANALYSIS (Centralized Logic) ---
-def analyze_form(cadence, gct=None, stride=None, bounce=None):
-    """
-    Analyze running form and return verdict, color, icon, and prescription.
-    Used for single-point diagnosis (Tooltips, Run Summary).
-    UPDATED: Better thresholds for mixed run/walk activities.
-    """
-    # Default Result
-    res = {
-        'verdict': 'ANALYZING',
-        'color': 'text-zinc-500',
-        'bg': 'border-zinc-700',
-        'icon': 'help_outline',
-        'prescription': 'Not enough data.'
-    }
-    
-    # 1. Safely cast and validate inputs
-    try:
-        cadence = float(cadence or 0)
-        gct = float(gct or 0)
-        stride = float(stride or 0)
-        bounce = float(bounce or 0)
-    except (ValueError, TypeError):
-        return res
-    
-    # If cadence is missing, we can't analyze
-    if cadence == 0:
-        return res
-
-    # 2. Normalize Units (Target: mm for both)
-    # Stride: If small (< 10), assume meters. If large (> 10), assume mm.
-    if stride < 10: 
-        stride_mm = stride * 1000
-    else:
-        stride_mm = stride
-
-    # Bounce: If small (< 1), assume meters. If moderate (< 20), assume cm. Else mm.
-    if bounce < 1:
-        bounce_mm = bounce * 1000
-    elif bounce < 20:
-        bounce_mm = bounce * 10
-    else:
-        bounce_mm = bounce
-
-    # 3. Calculate Vertical Ratio (%)
-    ratio = (bounce_mm / stride_mm) * 100 if stride_mm > 0 else 0
-    
-    # --- DIAGNOSIS TREE (Simple & Robust) ---
-    
-    # Elite/Good
-    if cadence >= 170:
-        res.update({
-            'verdict': 'ELITE FORM',
-            'color': 'text-emerald-400',
-            'bg': 'border-emerald-500/30',
-            'icon': 'verified',
-            'prescription': 'Pro-level mechanics. Excellent turnover.'
-        })
-    elif cadence >= 160:
-        res.update({
-            'verdict': 'GOOD FORM',
-            'color': 'text-blue-400',
-            'bg': 'border-blue-500/30',
-            'icon': 'check_circle',
-            'prescription': 'Balanced mechanics. Solid turnover.'
-        })
-    # The "Structural" Zone (Widened to 135 to catch recovery jogs/walks)
-    elif cadence < 135:
-        res.update({
-            'verdict': 'HIKING / REST',
-            'color': 'text-blue-400',
-            'bg': 'border-blue-500/30',
-            'icon': 'hiking',
-            'prescription': 'Power hiking or recovery interval.'
-        })
-    # The "Grey Area" (Renamed from Overstriding to Heavy Feet)
-    # Captures the 135-154 range which is typical for tired jogging
-    elif cadence < 155:
-        res.update({
-            'verdict': 'HEAVY FEET', 
-            'color': 'text-orange-400',
-            'bg': 'border-orange-500/30',
-            'icon': 'warning',
-            'prescription': 'Cadence is low. Focus on quick turnover.'
-        })
-    # The "Meh" Zone (155-159)
-    else:
-        res.update({
-            'verdict': 'PLODDING',
-            'color': 'text-yellow-400',
-            'bg': 'border-yellow-500/30',
-            'icon': 'do_not_step',
-            'prescription': 'Turnover is sluggish. Pick up your feet.'
-        })
-    
-    return res
-
-def classify_split(cadence, hr, max_hr, grade):
-    """
-    Classify a single split (mile/lap) into 3 Buckets.
-    UPDATED: Smarter handling of Recovery/Walking intervals.
-    """
-    # Safety defaults
-    cadence = cadence or 0
-    hr = hr or 0
-    max_hr = max_hr or 185
-    grade = grade or 0
-    
-    z2_limit = max_hr * 0.78
-    
-    # GATE 1: TERRAIN & RECOVERY (The Base)
-    # If steep grade (>8%) OR low cadence (<140), it's Structural/Recovery.
-    # <140 catches walking breaks and slow recovery jogs.
-    if grade > 8 or cadence < 140:
-        return 'STRUCTURAL'
-        
-    # GATE 2: METABOLIC (The Easy Miles)
-    if hr > 0 and hr <= z2_limit:
-        return 'STRUCTURAL'
-        
-    # GATE 3: PERFORMANCE (The Work)
-    # If you are running hard (High HR, Flat Ground)...
-    if cadence >= 160:
-        return 'HIGH QUALITY'  # Good mechanics
-    else:
-        return 'BROKEN'   # High HR + Low Cadence (140-159) = Mechanical Fade
 
 # --- MAIN APPLICATION CLASS ---
 class GarminAnalyzerApp:
@@ -269,8 +29,11 @@ class GarminAnalyzerApp:
     def __init__(self):
         """Initialize the application with database and state."""
         self.db = DatabaseManager()
-        self.current_session_id = None
+        # Load the last session ID from DB on startup so "Last Import" works after restart
+        self.current_session_id = self.db.get_last_session_id()
         self.current_timeframe = "Last 30 Days"
+        self.current_sort_by = 'date'
+        self.current_sort_desc = True # True = DESC, False = ASC
         self.activities_data = []
         self.df = None
         self.import_in_progress = False
@@ -2109,38 +1872,34 @@ class GarminAnalyzerApp:
     
     async def refresh_data_view(self):
         """
-        Refresh all views with current filter.
-        
-        This method:
-        - Queries database using DatabaseManager.get_activities()
-        - Converts results to Pandas DataFrame
-        - Parses dates and sorts by date
-        - Updates state variables (activities_data, df)
-        - Enables/disables export and copy buttons based on data availability
-        
-        Requirements: 6.7, 6.8, 11.1, 11.7
+        Refresh data using DB-side sorting.
         """
-        # Query database with current timeframe filter
+        # Convert boolean state to string for DB
+        sort_order = 'desc' if self.current_sort_desc else 'asc'
+
+        # 1. Fetch data sorted by DB
         self.activities_data = self.db.get_activities(
             self.current_timeframe, 
-            self.current_session_id
+            self.current_session_id,
+            sort_by=self.current_sort_by,   # <--- Uses state
+            sort_order=sort_order           # <--- Uses state
         )
         
-        # Convert to DataFrame if we have data
+        # 2. Convert to DataFrame (No need to sort in Pandas anymore!)
         if self.activities_data:
             self.df = pd.DataFrame(self.activities_data)
-            # Parse dates and sort by date
+            # We still need date_obj for the charts
             self.df['date_obj'] = pd.to_datetime(self.df['date'])
-            self.df = self.df.sort_values('date_obj')
+            # self.df = self.df.sort_values('date_obj') <-- DELETED (Redundant)
         else:
             self.df = None
         
         # Update all tabs
-        self.update_report_text()  # Task 8.1 - implemented
-        self.update_activities_grid()  # Task 9.1 - implemented
-        self.update_trends_chart()  # Task 12.1 - implemented
+        self.update_report_text() 
+        self.update_activities_grid() 
+        self.update_trends_chart() 
         
-        # Enable/disable export and copy buttons based on data availability
+        # Toggle buttons
         has_data = bool(self.activities_data)
         if has_data:
             self.export_btn.props(remove='disable')
@@ -3033,11 +2792,23 @@ Activity Breakdown: {activity_breakdown}
         # --- 4. RENDER TABLE ---
         with self.grid_container:
             with ui.card().classes('w-full bg-zinc-900 p-4 border-0').style('border-radius: 8px; overflow: hidden; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);'):
+                # Configure initial pagination state to match app state
+                initial_pagination = {
+                    'rowsPerPage': 0, # 0 = All rows (we handle filtering via DB)
+                    'sortBy': self.current_sort_by,
+                    'descending': self.current_sort_desc
+                }
+                
                 table = ui.table(
                     columns=columns,
                     rows=rows,
-                    row_key='hash'
+                    row_key='hash',
+                    pagination=initial_pagination 
                 ).classes('w-full h-full')
+                
+                # --- WIRE UP THE EVENT ---
+                # This tells NiceGUI: "When user clicks a header, don't sort locally. Call this function."
+                table.on('request', self.handle_table_request)
                 
                 # --- SLOT: DATE (Two-line stack) ---
                 table.add_slot('body-cell-date', '''
@@ -3047,7 +2818,7 @@ Activity Breakdown: {activity_breakdown}
                                 {{ props.row.date_display.split(', ')[0] }}, {{ props.row.date_display.split(', ')[1].split(' ')[0] }}
                             </span>
                             <span class="text-xs text-zinc-500 font-mono">
-                                {{ props.row.date_display.split(' ')[2] }}{{ props.row.date_display.split(' ')[3] }} {{ props.row.date_display.split(' ')[4] }}
+                                {{ props.row.date_display.split(' ')[2] }} {{ props.row.date_display.split(' ')[3] }}
                             </span>
                         </div>
                     </q-td>
@@ -3118,18 +2889,31 @@ Activity Breakdown: {activity_breakdown}
             </style>
             ''')
     
+    async def handle_table_request(self, e):
+        """
+        Handle server-side sort requests from the UI table.
+        """
+        # 1. Extract new sort settings from the event
+        pagination = e.args.get('pagination', {})
+        new_sort_by = pagination.get('sortBy')
+        new_descending = pagination.get('descending')
+        
+        # 2. Update App State
+        if new_sort_by:
+            self.current_sort_by = new_sort_by
+            self.current_sort_desc = new_descending
+            
+            # 3. Reload Data (Server-Side Sort)
+            await self.refresh_data_view()
+            
+            # 4. Notify user (Optional polish)
+            direction = "↓" if new_descending else "↑"
+            ui.notify(f"Sorted by {new_sort_by} {direction}", type='info', timeout=1000)
+
     async def delete_activity_inline(self, activity_hash, filename):
         """
         Delete activity from inline button click.
-        
-        This method:
-        - Shows confirmation dialog
-        - Deletes activity from database
-        - Updates runs counter
-        - Refreshes data view
-        - Shows success notification
-        
-        Requirements: 5.4, 5.5, 5.6, 5.7, 5.8
+        FIXED: Notify BEFORE refreshing to prevent context loss crash.
         """
         # Show confirmation dialog
         result = await ui.run_javascript(
@@ -3140,17 +2924,17 @@ Activity Breakdown: {activity_breakdown}
         # If confirmed, delete the activity
         if result:
             try:
-                # Delete the activity
+                # 1. Delete the activity from DB
                 self.db.delete_activity(activity_hash)
                 
-                # Update runs counter
+                # 2. Show notification NOW (while the button/table still exists)
+                ui.notify(f'Deleted: {filename[:30]}', type='positive')
+                
+                # 3. Update runs counter
                 self.runs_count_label.text = f'{self.db.get_count()}'
                 
-                # Refresh all data views
+                # 4. Refresh views (This wipes the table, which is fine now)
                 await self.refresh_data_view()
-                
-                # Show success notification
-                ui.notify(f'Deleted: {filename[:30]}', type='positive')
                 
             except Exception as e:
                 ui.notify(f'Error deleting activity: {str(e)}', type='negative')
@@ -3205,15 +2989,11 @@ Activity Breakdown: {activity_breakdown}
     def calculate_trend_stats(self, df_subset):
         """
         Calculate trend statistics for a DataFrame subset.
-        
-        Args:
-            df_subset: DataFrame with 'date_obj' and 'efficiency_factor' columns
-            
-        Returns:
-            tuple: (trend_msg, trend_color) - message string and hex color
+        FIXED: Checks for at least 2 data points to avoid SmallSampleWarning.
         """
-        if df_subset is None or df_subset.empty:
-            return ("Trend: No Data", "silver")
+        # Need at least 2 points to draw a line
+        if df_subset is None or len(df_subset) < 2:
+            return ("Trend: Insufficient Data", "silver")
         
         try:
             # Calculate linear regression trend for EF over time
@@ -3422,12 +3202,19 @@ Activity Breakdown: {activity_breakdown}
         
         # Calculate trend
         try:
-            from scipy.stats import linregress
-            x_nums = (self.df['date_obj'] - self.df['date_obj'].min()).dt.total_seconds()
-            y_ef = self.df['efficiency_factor']
-            slope, intercept, r_value, p_value, std_err = linregress(x_nums, y_ef)
-            
-            trend_msg, trend_color = self.calculate_trend_stats(self.df)
+            # SAFETY CHECK: Only calculate regression if we have 2+ points
+            if len(self.df) >= 2:
+                from scipy.stats import linregress
+                x_nums = (self.df['date_obj'] - self.df['date_obj'].min()).dt.total_seconds()
+                y_ef = self.df['efficiency_factor']
+                slope, intercept, r_value, p_value, std_err = linregress(x_nums, y_ef)
+                trend_msg, trend_color = self.calculate_trend_stats(self.df)
+            else:
+                # Fallback for single run
+                slope = 0
+                intercept = 0
+                trend_msg = "Trend: Insufficient Data"
+                trend_color = "#888888"
         except:
             slope = 0
             intercept = 0
@@ -3652,6 +3439,10 @@ Activity Breakdown: {activity_breakdown}
         
         # --- 1. Smart Trend Logic (Linear Regression) ---
         try:
+            # SAFETY CHECK: Need at least 2 points
+            if len(self.df) < 2:
+                raise ValueError("Not enough data")
+
             # Calculate linear regression trend for EF over time
             x_nums = (self.df['date_obj'] - self.df['date_obj'].min()).dt.total_seconds()
             y_ef = self.df['efficiency_factor']
@@ -4083,8 +3874,9 @@ Activity Breakdown: {activity_breakdown}
     def calculate_cadence_verdict(self, df):
         """
         Calculate verdict for Mechanics chart based on 'Form Score' Analysis.
-        Returns: ELITE (90+), GOOD (60+), or BROKEN (<60).
+        FIXED: Returns 'N/A' if fewer than 2 runs (prevents SmallSampleWarning).
         """
+        # SAFETY CHECK: Need at least 2 runs to calculate a trend
         if df is None or df.empty or len(df) < 2:
             return 'N/A', '#71717a', 'bg-zinc-700'
         
@@ -4101,7 +3893,7 @@ Activity Breakdown: {activity_breakdown}
             )
             verdict = form['verdict']
             
-            # Scoring Logic (Weighted Average)
+            # Scoring Logic
             if verdict == 'ELITE FORM':
                 scores.append(100)
                 dates.append(row['date_obj'])
@@ -4109,7 +3901,6 @@ Activity Breakdown: {activity_breakdown}
                 scores.append(80)
                 dates.append(row['date_obj'])
             elif verdict in ['HIKING / REST', 'AEROBIC / MIXED']:
-                # Skip structural miles - don't penalize strategy
                 continue 
             elif verdict in ['PLODDING', 'LOW CADENCE']:
                 scores.append(40)
@@ -4118,59 +3909,43 @@ Activity Breakdown: {activity_breakdown}
                 scores.append(0)
                 dates.append(row['date_obj'])
                 
-        # If no valid running data (only hiking), return Neutral
-        if not scores:
+        if not scores or len(scores) < 2:
             return 'STRUCTURAL', '#3b82f6', 'bg-blue-500/20'
             
-        # 2. Calculate Average Quality (The "State")
+        # 2. Calculate Average Quality
         avg_score = sum(scores) / len(scores)
         
-        # 3. Calculate Trend (The "Trajectory")
+        # 3. Calculate Trend
         try:
             from scipy.stats import linregress
-            # Convert dates to seconds for regression
             x_nums = [(d - min(dates)).total_seconds() for d in dates]
-            slope, _, _, _, _ = linregress(x_nums, scores)
-            # Normalize slope to "Points per week"
-            slope_week = slope * 604800
+            # SAFETY CHECK again for the regression input
+            if len(x_nums) < 2:
+                slope_week = 0
+            else:
+                slope, _, _, _, _ = linregress(x_nums, scores)
+                slope_week = slope * 604800
         except:
             slope_week = 0
 
-        # --- FINAL VERDICT LOGIC (Professor Grading Scale) ---
-        
-        # Scenario A: ELITE (Must be >= 90)
-        # Your 83.75 will fail this check.
+        # --- FINAL VERDICT LOGIC ---
         if avg_score >= 90:
-            if slope_week < -10: 
-                return 'SLIPPING', '#fbbf24', 'bg-yellow-500/20'
+            if slope_week < -10: return 'SLIPPING', '#fbbf24', 'bg-yellow-500/20'
             return 'ELITE', '#10b981', 'bg-emerald-500/20'
-            
-        # Scenario B: GOOD (60 - 89)
-        # Your 83.75 lands here.
         elif avg_score >= 60:
-            if slope_week > 10:
-                return 'IMPROVING', '#10b981', 'bg-emerald-500/20'
-            elif slope_week < -10:
-                return 'SLIPPING', '#fbbf24', 'bg-yellow-500/20'
+            if slope_week > 10: return 'IMPROVING', '#10b981', 'bg-emerald-500/20'
+            elif slope_week < -10: return 'SLIPPING', '#fbbf24', 'bg-yellow-500/20'
             return 'GOOD', '#3b82f6', 'bg-blue-500/20'
-            
-        # Scenario C: BROKEN (< 60)
         else:
-            if slope_week > 10:
-                return 'IMPROVING', '#3b82f6', 'bg-blue-500/20'
+            if slope_week > 10: return 'IMPROVING', '#3b82f6', 'bg-blue-500/20'
             return 'BROKEN', '#ef4444', 'bg-red-500/20'
     
     def calculate_efficiency_verdict(self, df):
         """
-        Calculate verdict for Efficiency chart using hierarchical logic with tolerance buffers.
-        
-        Rule #1: Check Decoupling Slope (Safety First) - with 0.2 tolerance
-        Rule #2: Check EF Slope (Stale Check) - with 0.1 tolerance
-        Rule #3: Both good = SOLID
-        
-        Returns:
-            tuple: (verdict_text, verdict_color, verdict_bg)
+        Calculate verdict for Efficiency chart using hierarchical logic.
+        FIXED: Returns 'N/A' if fewer than 2 runs (prevents SmallSampleWarning).
         """
+        # SAFETY CHECK: Need at least 2 runs to calculate a slope
         if df is None or df.empty or len(df) < 2:
             return 'N/A', '#71717a', 'bg-zinc-700'
         
@@ -4188,11 +3963,11 @@ Activity Breakdown: {activity_breakdown}
             slope_ef, _, _, _, _ = linregress(x_nums, y_ef)
             slope_ef_per_week = (slope_ef * 604800) * 100
             
-            # Rule #1: Safety First - Check Decoupling (with 0.2 tolerance)
+            # Rule #1: Safety First - Check Decoupling
             if slope_dec_per_week > 0.2:
                 return 'GARBAGE', '#ef4444', 'bg-red-500/20'
             
-            # Rule #2: Stale Check - Check EF (with 0.1 tolerance)
+            # Rule #2: Stale Check - Check EF
             if slope_ef_per_week < -0.1:
                 return 'MEH', '#3b82f6', 'bg-blue-500/20'
             
@@ -4223,6 +3998,10 @@ Activity Breakdown: {activity_breakdown}
             if self.df is not None and not self.df.empty:
                 # Calculate trend stats for full dataset
                 try:
+                    # SAFETY CHECK: Need at least 2 points for regression
+                    if len(self.df) < 2:
+                        raise ValueError("Not enough data")
+
                     from scipy.stats import linregress
                     x_nums = (self.df['date_obj'] - self.df['date_obj'].min()).dt.total_seconds()
                     y_ef = self.df['efficiency_factor']
@@ -4231,8 +4010,6 @@ Activity Breakdown: {activity_breakdown}
                     
                     # Calculate stats for the stats bar
                     r_squared = r_value ** 2
-                    # EF slope: convert to percentage change per week
-                    # slope is in EF units per second, multiply by seconds in week, then by 100 for %
                     slope_pct_per_week = (slope * 604800) * 100
                 except:
                     trend_msg = None
@@ -4535,6 +4312,10 @@ Activity Breakdown: {activity_breakdown}
                     (self.df['date_obj'] <= end_date)
                 ]
                 
+                # SAFETY CHECK
+                if len(df_zoomed) < 2:
+                    return
+
                 # Recalculate trend for zoomed data
                 trend_msg, trend_color = self.calculate_trend_stats(df_zoomed)
                 

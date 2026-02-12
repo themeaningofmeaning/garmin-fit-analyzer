@@ -15,6 +15,68 @@ def get_best_value(record, legacy_key, enhanced_key):
     val = record.get(enhanced_key) or record.get(legacy_key)
     return val
 
+def analyze_form(cadence, gct=None, stride=None, bounce=None):
+    """
+    Analyze running form and return verdict, color, icon, and prescription.
+    """
+    # Default Result
+    res = {
+        'verdict': 'ANALYZING',
+        'color': 'text-zinc-500',
+        'bg': 'border-zinc-700',
+        'icon': 'help_outline',
+        'prescription': 'Not enough data.'
+    }
+    
+    # 1. Safely cast and validate inputs
+    try:
+        cadence = float(cadence or 0)
+        gct = float(gct or 0)
+        stride = float(stride or 0)
+        bounce = float(bounce or 0)
+    except (ValueError, TypeError):
+        return res
+    
+    if cadence == 0:
+        return res
+
+    # 2. Normalize Units (Target: mm for both)
+    if stride < 10: stride_mm = stride * 1000
+    else: stride_mm = stride
+
+    if bounce < 1: bounce_mm = bounce * 1000
+    elif bounce < 20: bounce_mm = bounce * 10
+    else: bounce_mm = bounce
+
+    # --- DIAGNOSIS TREE ---
+    if cadence >= 170:
+        res.update({'verdict': 'ELITE FORM', 'color': 'text-emerald-400', 'bg': 'border-emerald-500/30', 'icon': 'verified', 'prescription': 'Pro-level mechanics. Excellent turnover.'})
+    elif cadence >= 160:
+        res.update({'verdict': 'GOOD FORM', 'color': 'text-blue-400', 'bg': 'border-blue-500/30', 'icon': 'check_circle', 'prescription': 'Balanced mechanics. Solid turnover.'})
+    elif cadence < 135:
+        res.update({'verdict': 'HIKING / REST', 'color': 'text-blue-400', 'bg': 'border-blue-500/30', 'icon': 'hiking', 'prescription': 'Power hiking or recovery interval.'})
+    elif cadence < 155:
+        res.update({'verdict': 'HEAVY FEET', 'color': 'text-orange-400', 'bg': 'border-orange-500/30', 'icon': 'warning', 'prescription': 'Cadence is low. Focus on quick turnover.'})
+    else:
+        res.update({'verdict': 'PLODDING', 'color': 'text-yellow-400', 'bg': 'border-yellow-500/30', 'icon': 'do_not_step', 'prescription': 'Turnover is sluggish. Pick up your feet.'})
+    
+    return res
+
+def classify_split(cadence, hr, max_hr, grade):
+    """
+    Classify a single split (mile/lap) into 3 Buckets.
+    """
+    cadence = cadence or 0
+    hr = hr or 0
+    max_hr = max_hr or 185
+    grade = grade or 0
+    z2_limit = max_hr * 0.78
+    
+    if grade > 8 or cadence < 140: return 'STRUCTURAL'
+    if hr > 0 and hr <= z2_limit: return 'STRUCTURAL'
+    if cadence >= 160: return 'HIGH QUALITY'
+    else: return 'BROKEN'
+    
 def minetti_cost_of_running(grade):
     grade = np.clip(grade, -0.45, 0.45)
     cost = 155.4*(grade**5) - 30.4*(grade**4) - 43.3*(grade**3) + 46.3*(grade**2) + 19.5*grade + 3.6
