@@ -77,6 +77,10 @@ class GarminAnalyzerApp:
 
         # Initialize the volume data container
         self.weekly_volume_data = None
+        self.weekly_mix_data = None
+        self.weekly_load_data = None
+        self.weekly_hr_zones_data = None
+        self.volume_week_starts = []  # week index map for volume chart zoom
 
         # LRU-ish cache for parsed activity detail payloads (avoids reparsing FIT on reopen)
         self.activity_detail_cache = {}
@@ -1626,6 +1630,29 @@ class GarminAnalyzerApp:
         table.classes('bg-zinc-900 text-gray-200')
         return table
 
+    def classify_single_run_aerobic_verdict(self, run_ef, run_decoupling, avg_ef=None):
+        """
+        Classify a single run's aerobic efficiency verdict.
+
+        Returns:
+            tuple: (verdict, bg_class, border_class, text_class, icon)
+        """
+        if avg_ef is None:
+            avg_ef = self.df['efficiency_factor'].mean() if self.df is not None else 0
+        if pd.isna(avg_ef):
+            avg_ef = 0
+
+        ef_above_avg = run_ef >= avg_ef if avg_ef > 0 else False
+        low_decouple = run_decoupling <= 5
+
+        if ef_above_avg and low_decouple:
+            return 'Efficient', 'bg-emerald-500/10', 'border-emerald-700/30', 'text-emerald-400', '⚡'
+        if not ef_above_avg and low_decouple:
+            return 'Base', 'bg-blue-500/10', 'border-blue-700/30', 'text-blue-400', '🧱'
+        if ef_above_avg and not low_decouple:
+            return 'Pushing', 'bg-orange-500/10', 'border-orange-700/30', 'text-orange-400', '🔥'
+        return 'Fatigued', 'bg-red-500/10', 'border-red-700/30', 'text-red-400', '⚠️'
+
     def create_decoupling_card(self, decoupling_data, efficiency_factor=None):
         """
         Create card displaying aerobic decoupling metrics.
@@ -1637,40 +1664,53 @@ class GarminAnalyzerApp:
         Returns:
             NiceGUI card component
         """
+        run_ef = efficiency_factor or 0
+        run_decoupling = decoupling_data.get('decoupling_pct', 0)
+        aero_verdict, aero_bg, aero_border, aero_text, aero_icon = self.classify_single_run_aerobic_verdict(
+            run_ef,
+            run_decoupling,
+        )
+
         with ui.card().classes('bg-zinc-900 p-4 border border-zinc-800 h-full') as card:
             card.style('border-radius: 8px; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);')
 
             # Title with info icon
-            with ui.row().classes('items-center gap-2 mb-3'):
+            with ui.row().classes('items-center gap-2 mb-2'):
                 ui.label('AEROBIC EFFICIENCY').classes('text-lg font-bold text-white')
-                ae_info_icon = ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-base transition-colors')
-                ae_info_icon.on('click', lambda: self.show_aerobic_efficiency_info())
+                ae_info_icon = ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-base transition-colors ml-auto')
+                ae_info_icon.on('click', lambda av=aero_verdict: self.show_aerobic_efficiency_info(highlight_verdict=av))
 
-            # Data Section: Efficiency Factor (Top Priority)
-            if efficiency_factor and efficiency_factor > 0:
-                with ui.column().classes('gap-0'):
-                    ui.label('EFFICIENCY FACTOR').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
+            # Verdict pill (visual indicator only; modal opens from header info icon)
+            aero_pill = ui.row().classes(
+                f'items-center gap-2 px-2.5 py-1 rounded border {aero_bg} {aero_border} mb-3 w-fit'
+            )
+            with aero_pill:
+                ui.label(aero_icon).classes('text-sm')
+                ui.label(aero_verdict).classes(f'text-xs font-bold {aero_text}')
+
+            # Compact two-block layout to reduce total card height
+            with ui.row().classes('w-full gap-2'):
+                if efficiency_factor and efficiency_factor > 0:
+                    with ui.column().classes('flex-1 min-w-0 gap-0 bg-zinc-950/70 border border-zinc-800 rounded px-3 py-2'):
+                        ui.label('EFFICIENCY FACTOR').classes('text-[10px] text-zinc-500 uppercase tracking-wider font-semibold')
+                        with ui.row().classes('items-baseline gap-2'):
+                            ui.label(f'{efficiency_factor:.2f}').classes('text-2xl font-bold text-white leading-none')
+                            ui.label('speed/HR').classes('text-[11px] text-zinc-500 font-bold')
+
+                with ui.column().classes('flex-1 min-w-0 gap-0 bg-zinc-950/70 border border-zinc-800 rounded px-3 py-2'):
+                    ui.label('AEROBIC DECOUPLING').classes('text-[10px] text-zinc-500 uppercase tracking-wider font-semibold')
                     with ui.row().classes('items-baseline gap-2'):
-                        ui.label(f'{efficiency_factor:.2f}').classes('text-3xl font-bold text-white')
-                        ui.label('speed/HR').classes('text-xs text-zinc-500 font-bold')
-            
-            ui.separator().classes('bg-zinc-800 my-3')
+                        ui.label(f"{decoupling_data['decoupling_pct']:.1f}%").classes('text-2xl font-bold leading-none').style(
+                            f"color: {decoupling_data['color']};"
+                        )
+                        ui.label(decoupling_data['status']).classes('text-base font-bold').style(
+                            f"color: {decoupling_data['color']};"
+                        )
 
-            # Data Section: Decoupling
-            with ui.column().classes('gap-0'):
-                ui.label('AEROBIC DECOUPLING').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
-                with ui.row().classes('items-baseline gap-2'):
-                    ui.label(f"{decoupling_data['decoupling_pct']:.1f}%").classes('text-2xl font-bold').style(
-                        f"color: {decoupling_data['color']};"
-                    )
-                    ui.label(decoupling_data['status']).classes('text-base font-bold').style(
-                        f"color: {decoupling_data['color']};"
-                    )
-
-            # Detail Metrics (Small)
-            with ui.column().classes('mt-auto gap-0.5 pt-2'):
-                ui.label(f"1st Half: {decoupling_data['ef_first_half']:.4f}").classes('text-[10px] text-zinc-600')
-                ui.label(f"2nd Half: {decoupling_data['ef_second_half']:.4f}").classes('text-[10px] text-zinc-600')
+            # Detail Metrics (compact single line)
+            ui.label(
+                f"1st Half EF: {decoupling_data['ef_first_half']:.4f}  |  2nd Half EF: {decoupling_data['ef_second_half']:.4f}"
+            ).classes('text-[10px] text-zinc-600 mt-2')
 
         return card
     
@@ -3681,22 +3721,11 @@ root.destroy()
                                 # Aerobic Efficiency Verdict Pill
                                 run_ef = d.get('efficiency_factor', 0)
                                 run_cost = d.get('decoupling', 0)
-                                ef_above_avg = run_ef >= avg_ef if avg_ef > 0 else False
-                                low_decouple = run_cost <= 5
-                                
-                                if ef_above_avg and low_decouple:
-                                    aero_verdict, aero_bg, aero_border, aero_text = 'Efficient', 'bg-emerald-500/10', 'border-emerald-700/30', 'text-emerald-400'
-                                elif not ef_above_avg and low_decouple:
-                                    aero_verdict, aero_bg, aero_border, aero_text = 'Base', 'bg-blue-500/10', 'border-blue-700/30', 'text-blue-400'
-                                elif ef_above_avg and not low_decouple:
-                                    aero_verdict, aero_bg, aero_border, aero_text = 'Pushing', 'bg-orange-500/10', 'border-orange-700/30', 'text-orange-400'
-                                else:
-                                    aero_verdict, aero_bg, aero_border, aero_text = 'Fatigued', 'bg-red-500/10', 'border-red-700/30', 'text-red-400'
-                                
-                                verdict_emojis = {
-                                    'Efficient': '⚡', 'Base': '🧱', 'Pushing': '🔥', 'Fatigued': '⚠️'
-                                }
-                                aero_icon = verdict_emojis.get(aero_verdict, '⚡')
+                                aero_verdict, aero_bg, aero_border, aero_text, aero_icon = self.classify_single_run_aerobic_verdict(
+                                    run_ef,
+                                    run_cost,
+                                    avg_ef=avg_ef,
+                                )
                                 
                                 # Fix Hover: Use explicit bg-opacity instead of brightness to avoid fading issue
                                 hover_bg = aero_bg.replace('/10', '/30') 
@@ -3782,135 +3811,176 @@ A sign your body is struggling to recover from recent hard training.
         
         dialog.open()
     
-    def show_volume_info(self):
+    def show_volume_info(self, highlight_verdict=None):
         """
         Show informational modal about the current Volume lens.
-        Content adapts based on self.volume_lens.
+        Content adapts based on self.volume_lens and highlights the active verdict.
         """
+        current_verdict = highlight_verdict
+        if not current_verdict and hasattr(self, 'volume_verdict_label'):
+            current_verdict = getattr(self.volume_verdict_label, 'text', None)
+
+        if not current_verdict:
+            if self.volume_lens == 'mix':
+                current_verdict, _, _ = self.calculate_mix_verdict()
+            elif self.volume_lens == 'load':
+                current_verdict, _, _ = self.calculate_load_verdict()
+            elif self.volume_lens == 'zones':
+                current_verdict, _, _ = self.calculate_hr_zones_verdict()
+            else:
+                current_verdict, _, _ = self.calculate_volume_verdict()
+
         with ui.dialog() as dialog, ui.card().classes('bg-zinc-900 text-white p-6 max-w-2xl border border-zinc-800'):
-            
+
+            def style_card(label_verdict, base_color, text_color):
+                is_active = (current_verdict == label_verdict)
+                if is_active:
+                    if label_verdict == 'ZONE 3 JUNK':
+                        return (
+                            'background: rgba(71, 85, 105, 0.42); '
+                            'border: 2px solid rgba(148, 163, 184, 0.98); '
+                            'box-shadow: 0 0 0 1px rgba(226, 232, 240, 0.30) inset, 0 0 24px rgba(148, 163, 184, 0.24);',
+                            'text-slate-100'
+                        )
+                    return f'background: {base_color}2A; border: 2px solid {base_color}90;', text_color
+                return f'background: {base_color}14; border: 1px solid {base_color}40;', text_color
+
             if self.volume_lens == 'quality':
-                # === QUALITY LENS ===
                 ui.label('Volume Quality Analysis').classes('text-xl font-bold text-white mb-2')
-                with ui.column().classes('gap-6'):
-                    with ui.row().classes('gap-4 items-start'):
-                        ui.icon('verified').classes('text-emerald-400 text-2xl mt-1')
-                        with ui.column().classes('gap-1'):
-                            ui.label('High Quality (The Engine)').classes('text-base font-bold text-emerald-400')
-                            ui.label('Running on flat/rolling terrain with good mechanics (Cadence > 160) and honest effort. These miles build fitness without breaking the chassis.').classes('text-sm text-zinc-300')
-                    with ui.row().classes('gap-4 items-start'):
-                        ui.icon('hiking').classes('text-blue-400 text-2xl mt-1')
-                        with ui.column().classes('gap-1'):
-                            ui.label('Structural (The Base)').classes('text-base font-bold text-blue-400')
-                            ui.label('Valid volume that includes Hiking (Steep Grade), Recovery Shuffles (Low HR), or Walking. These miles build durability and aerobic base without the mechanical stress of fast running.').classes('text-sm text-zinc-300')
-                    with ui.row().classes('gap-4 items-start'):
-                        ui.icon('warning').classes('text-red-400 text-2xl mt-1')
-                        with ui.column().classes('gap-1'):
-                            ui.label('Broken (The Junk)').classes('text-base font-bold text-red-400')
-                            ui.label('The "Danger Zone." You are working hard (High HR) but moving poorly (Low Cadence). This usually happens at the end of long runs when form falls apart. These miles cause injury.').classes('text-sm text-zinc-300')
+                with ui.column().classes('gap-4'):
+                    s, t = style_card('High Quality Miles', '#10b981', 'text-emerald-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
+                        with ui.row().classes('gap-3 items-start'):
+                            ui.icon('verified').classes(f'{t} text-xl mt-0.5')
+                            with ui.column().classes('gap-1'):
+                                ui.label('High Quality (The Engine)').classes(f'text-base font-bold {t}')
+                                ui.label('Running on flat/rolling terrain with good mechanics (Cadence > 160) and honest effort. These miles build fitness without breaking the chassis.').classes('text-sm text-zinc-300')
+
+                    s, t = style_card('Structural Miles', '#3b82f6', 'text-blue-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
+                        with ui.row().classes('gap-3 items-start'):
+                            ui.icon('hiking').classes(f'{t} text-xl mt-0.5')
+                            with ui.column().classes('gap-1'):
+                                ui.label('Structural (The Base)').classes(f'text-base font-bold {t}')
+                                ui.label('Valid volume that includes Hiking (Steep Grade), Recovery Shuffles (Low HR), or Walking. These miles build durability and aerobic base without the mechanical stress of fast running.').classes('text-sm text-zinc-300')
+
+                    s, t = style_card('Broken Miles', '#ef4444', 'text-red-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
+                        with ui.row().classes('gap-3 items-start'):
+                            ui.icon('warning').classes(f'{t} text-xl mt-0.5')
+                            with ui.column().classes('gap-1'):
+                                ui.label('Broken (The Junk)').classes(f'text-base font-bold {t}')
+                                ui.label('The "Danger Zone." You are working hard (High HR) but moving poorly (Low Cadence). This usually happens at the end of long runs when form falls apart. These miles cause injury.').classes('text-sm text-zinc-300')
+
                 ui.separator().classes('my-6 border-zinc-800')
                 with ui.column().classes('gap-2 mb-4'):
                     ui.label('How we decide:').classes('text-xs font-bold text-zinc-500 uppercase tracking-wider')
                     ui.label('We analyze every single mile split against Terrain, Metabolic Cost, and Mechanics.').classes('text-sm text-zinc-400')
 
             elif self.volume_lens == 'mix':
-                # === TRAINING MIX LENS (verdict-focused) ===
                 ui.label('Training Mix Analysis').classes('text-xl font-bold text-white mb-2')
                 ui.label('Shows how your weekly mileage breaks down by run type (Easy, Tempo, Hard). Your verdict reflects the balance:').classes('text-sm text-zinc-400 mb-4')
                 with ui.column().classes('gap-4'):
-                    # Verdict: POLARIZED (ideal)
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.25);'):
+                    s, t = style_card('POLARIZED', '#10b981', 'text-emerald-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('check_circle').classes('text-emerald-400 text-lg')
-                            ui.label('POLARIZED').classes('text-sm font-bold text-emerald-400')
+                            ui.icon('check_circle').classes(f'{t} text-lg')
+                            ui.label('POLARIZED').classes(f'text-sm font-bold {t}')
                         ui.label('The gold standard — 80%+ easy miles with purposeful hard sessions. You\'re building a big aerobic engine while sharpening speed. Keep it up.').classes('text-sm text-zinc-300')
-                    # Verdict: BALANCED
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.25);'):
+
+                    s, t = style_card('BALANCED', '#3b82f6', 'text-blue-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('balance').classes('text-blue-400 text-lg')
-                            ui.label('BALANCED').classes('text-sm font-bold text-blue-400')
+                            ui.icon('balance').classes(f'{t} text-lg')
+                            ui.label('BALANCED').classes(f'text-sm font-bold {t}')
                         ui.label('A decent variety of run types. Not bad, but pushing more volume into easy runs would unlock better aerobic gains with less fatigue.').classes('text-sm text-zinc-300')
-                    # Verdict: TEMPO HEAVY (warning)
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.25);'):
+
+                    s, t = style_card('TEMPO HEAVY', '#ef4444', 'text-red-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('warning_amber').classes('text-amber-400 text-lg')
-                            ui.label('TEMPO HEAVY').classes('text-sm font-bold text-amber-400')
+                            ui.icon('warning_amber').classes(f'{t} text-lg')
+                            ui.label('TEMPO HEAVY').classes(f'text-sm font-bold {t}')
                         ui.label('Too much time in the moderate zone without enough easy. This leads to chronic fatigue without the recovery to absorb it. Swap some tempo runs for true easy days.').classes('text-sm text-zinc-300')
-                    # Verdict: MONOTONE
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(249, 115, 22, 0.1); border: 1px solid rgba(249, 115, 22, 0.25);'):
+
+                    s, t = style_card('MONOTONE', '#f97316', 'text-orange-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('repeat').classes('text-orange-400 text-lg')
-                            ui.label('MONOTONE').classes('text-sm font-bold text-orange-400')
+                            ui.icon('repeat').classes(f'{t} text-lg')
+                            ui.label('MONOTONE').classes(f'text-sm font-bold {t}')
                         ui.label('Nearly all your miles are the same type. Add variety — even one tempo or interval session per week creates a stronger training stimulus.').classes('text-sm text-zinc-300')
 
             elif self.volume_lens == 'load':
-                # === LOAD LENS (matches chart legend: Recovery/Maintenance/Productive/Overreaching) ===
                 ui.label('Training Load Analysis').classes('text-xl font-bold text-white mb-2')
                 ui.label('Each bar shows your weekly mileage broken down by training stress. Strain is calculated from duration, intensity, and heart rate for each run:').classes('text-sm text-zinc-400 mb-4')
                 with ui.column().classes('gap-4'):
-                    # Legend/Verdict: MAINTAINING (healthy balance)
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.25);'):
+                    s, t = style_card('MAINTAINING', '#10b981', 'text-emerald-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('check_circle').classes('text-emerald-400 text-lg')
-                            ui.label('MAINTAINING').classes('text-sm font-bold text-emerald-400')
+                            ui.icon('check_circle').classes(f'{t} text-lg')
+                            ui.label('MAINTAINING').classes(f'text-sm font-bold {t}')
                         ui.label('A healthy mix of easy and hard runs — your training load is sustainable and balanced. The sweet spot for steady progress without burnout.').classes('text-sm text-zinc-300')
-                    # Legend: Recovery
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(96, 165, 250, 0.1); border: 1px solid rgba(96, 165, 250, 0.25);'):
+
+                    s, t = style_card('UNDERTRAINED', '#3b82f6', 'text-blue-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('spa').classes('text-blue-400 text-lg')
-                            ui.label('UNDERTRAINED').classes('text-sm font-bold text-blue-400')
+                            ui.icon('spa').classes(f'{t} text-lg')
+                            ui.label('UNDERTRAINED').classes(f'text-sm font-bold {t}')
                         ui.label('Nearly all recovery-level runs with no real stimulus. Great after a race, but sustained easy-only training won\'t build fitness. Add one harder session per week.').classes('text-sm text-zinc-300')
-                    # Legend: Productive
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(249, 115, 22, 0.1); border: 1px solid rgba(249, 115, 22, 0.25);'):
+
+                    s, t = style_card('PRODUCTIVE', '#f97316', 'text-orange-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('trending_up').classes('text-orange-400 text-lg')
-                            ui.label('PRODUCTIVE').classes('text-sm font-bold text-orange-400')
+                            ui.icon('trending_up').classes(f'{t} text-lg')
+                            ui.label('PRODUCTIVE').classes(f'text-sm font-bold {t}')
                         ui.label('Heavy productive volume — you\'re pushing hard. This builds fitness fast but can\'t be sustained indefinitely. Plan a step-back week every 3-4 weeks.').classes('text-sm text-zinc-300')
-                    # Legend: Overreaching
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.25);'):
+
+                    s, t = style_card('OVERREACHING', '#ef4444', 'text-red-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('warning').classes('text-red-400 text-lg')
-                            ui.label('OVERREACHING').classes('text-sm font-bold text-red-400')
+                            ui.icon('warning').classes(f'{t} text-lg')
+                            ui.label('OVERREACHING').classes(f'text-sm font-bold {t}')
                         ui.label('Too many high-stress sessions. An occasional spike is fine, but repeated overreaching leads to injury and staleness. Follow with an easy week.').classes('text-sm text-zinc-300')
 
             elif self.volume_lens == 'zones':
-                # === HR ZONES LENS (5 zone-anchored verdicts) ===
                 ui.label('Heart Rate Zones Analysis').classes('text-xl font-bold text-white mb-2')
                 ui.label('Shows weekly time distribution across heart rate zones. The 80/20 rule says ~80% of training should be easy (Zone 1-2) and ~20% hard (Zone 4-5):').classes('text-sm text-zinc-400 mb-4')
+
                 with ui.column().classes('gap-4'):
-                    # Verdict: 80/20 BALANCED (ideal)
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.25);'):
+                    s, t = style_card('80/20 BALANCED', '#10b981', 'text-emerald-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('check_circle').classes('text-emerald-400 text-lg')
-                            ui.label('80/20 BALANCED').classes('text-sm font-bold text-emerald-400')
+                            ui.icon('check_circle').classes(f'{t} text-lg')
+                            ui.label('80/20 BALANCED').classes(f'text-sm font-bold {t}')
                         ui.label('The gold standard — ~80% easy, ~20% hard. You\'re building a massive aerobic engine while sharpening speed with controlled intensity. This is how elites train.').classes('text-sm text-zinc-300')
-                    # Verdict: ZONE 2 BASE
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.25);'):
+
+                    s, t = style_card('ZONE 2 BASE', '#3b82f6', 'text-blue-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('favorite').classes('text-blue-400 text-lg')
-                            ui.label('ZONE 2 BASE').classes('text-sm font-bold text-blue-400')
+                            ui.icon('favorite').classes(f'{t} text-lg')
+                            ui.label('ZONE 2 BASE').classes(f'text-sm font-bold {t}')
                         ui.label('Nearly all Zone 1-2. This is where mitochondrial magic happens — fat oxidation, capillary density, cardiac efficiency. Great for base building, but one hard session per week rounds it out.').classes('text-sm text-zinc-300')
-                    # Verdict: ZONE 3 JUNK (cautionary)
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.25);'):
+
+                    s, t = style_card('ZONE 3 JUNK', '#64748b', 'text-slate-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('pause_circle').classes('text-amber-400 text-lg')
-                            ui.label('ZONE 3 JUNK').classes('text-sm font-bold text-amber-400')
+                            ui.icon('pause_circle').classes(f'{t} text-lg')
+                            ui.label('ZONE 3 JUNK').classes(f'text-sm font-bold {t}')
                         ui.label('Too much time in the grey zone — not easy enough to recover, not hard enough to force adaptation. This is wasted effort. Slow your easy runs and make hard days truly hard.').classes('text-sm text-zinc-300')
-                    # Verdict: ZONE 4 THRESHOLD ADDICT
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(249, 115, 22, 0.1); border: 1px solid rgba(249, 115, 22, 0.25);'):
+
+                    s, t = style_card('ZONE 4 THRESHOLD ADDICT', '#f97316', 'text-orange-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('fitness_center').classes('text-orange-400 text-lg')
-                            ui.label('ZONE 4 THRESHOLD ADDICT').classes('text-sm font-bold text-orange-400')
+                            ui.icon('fitness_center').classes(f'{t} text-lg')
+                            ui.label('ZONE 4 THRESHOLD ADDICT').classes(f'text-sm font-bold {t}')
                         ui.label('Excessive threshold grinding. Zone 4 builds lactate clearance, but more than ~2 sessions/week accumulates fatigue without enough recovery. Add more easy volume between hard days.').classes('text-sm text-zinc-300')
-                    # Verdict: ZONE 5 REDLINING
-                    with ui.element('div').classes('rounded-lg p-3').style('background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.25);'):
+
+                    s, t = style_card('ZONE 5 REDLINING', '#ef4444', 'text-red-400')
+                    with ui.element('div').classes('rounded-lg p-3').style(s):
                         with ui.row().classes('items-center gap-2 mb-1'):
-                            ui.icon('local_fire_department').classes('text-red-400 text-lg')
-                            ui.label('ZONE 5 REDLINING').classes('text-sm font-bold text-red-400')
+                            ui.icon('local_fire_department').classes(f'{t} text-lg')
+                            ui.label('ZONE 5 REDLINING').classes(f'text-sm font-bold {t}')
                         ui.label('Too much VO2max-level effort. Zone 5 is powerful but demands ~48h recovery between sessions. Back off and rebuild your aerobic base — the speed will come back faster.').classes('text-sm text-zinc-300')
 
-
-            # "Got it!" Button (all lenses)
             ui.button('Got it!', on_click=dialog.close).classes('w-full bg-green-600 hover:bg-green-500 text-white font-bold')
 
         dialog.open()
@@ -4049,16 +4119,27 @@ Lower is better (<5% is solid). Your heart is working harder to maintain the sam
         
         dialog.open()
     
-    def show_aerobic_efficiency_info(self, highlight_verdict=None):
+    def show_aerobic_efficiency_info(self, highlight_verdict=None, from_trends=False):
         """
         Show informational modal explaining Aerobic Efficiency, EF, Decoupling, and all 4 verdicts.
         If highlight_verdict is provided, that verdict section gets visually emphasized.
         """
+        normalized_highlight = (highlight_verdict or '').strip().upper()
+        verdict_aliases = {
+            'PEAKING': 'EFFICIENT',
+            'BUILDING': 'PUSHING',
+            'STABLE': 'BASE',
+            'DETRAINING': 'FATIGUED',
+            'DRIFTING': 'FATIGUED',
+        }
+        normalized_highlight = verdict_aliases.get(normalized_highlight, normalized_highlight)
+
         verdicts = [
             {
                 'key': 'Efficient',
-                'condition': 'High EF + Low Drift',
-                'meaning': 'Your output is high relative to your effort. This is the sweet spot of training.',
+                'concept': 'Peak Durability',
+                'description': 'You are generating high speed with minimal cardiac stress. Your heart rate stayed stable relative to your pace.',
+                'takeaway': 'This is your sustainable race mode. You are converting fuel to motion efficiently with zero wasted energy.',
                 'color': 'text-emerald-400',
                 'bg': 'bg-emerald-500/10',
                 'border': 'border-emerald-500/30',
@@ -4066,8 +4147,9 @@ Lower is better (<5% is solid). Your heart is working harder to maintain the sam
             },
             {
                 'key': 'Pushing',
-                'condition': 'High EF + High Drift',
-                'meaning': 'You were putting in effort and intensity, this is good training.',
+                'concept': 'Building Engine',
+                'description': 'High output, but with cardiac drift (>5%). You ran hard, but your heart rate rose faster than your pace later in the run.',
+                'takeaway': 'This provides a strong fitness stimulus (Tempo/Threshold), but carries a higher recovery cost. Treat these as "hard days" and do not do them back-to-back.',
                 'color': 'text-orange-400',
                 'bg': 'bg-orange-500/10',
                 'border': 'border-orange-500/30',
@@ -4075,8 +4157,9 @@ Lower is better (<5% is solid). Your heart is working harder to maintain the sam
             },
             {
                 'key': 'Base',
-                'condition': 'Low EF + Low Drift',
-                'meaning': 'This run is building your foundation.',
+                'concept': 'Volume Capacity',
+                'description': 'Moderate output with rock-solid stability. Your heart rate did not drift, meaning you stayed purely aerobic.',
+                'takeaway': 'This is the safe zone for adding mileage. These runs strengthen your chassis without taxing your recovery. This state should make up the majority (~80%) of your weekly training.',
                 'color': 'text-blue-400',
                 'bg': 'bg-blue-500/10',
                 'border': 'border-blue-500/30',
@@ -4084,8 +4167,9 @@ Lower is better (<5% is solid). Your heart is working harder to maintain the sam
             },
             {
                 'key': 'Fatigued',
-                'condition': 'Low EF + High Drift',
-                'meaning': 'Clear warning label: output is low AND heart rate is rising. Your body is tired.',
+                'concept': 'Compromised / Warning',
+                'description': 'Low output with high cardiac drift. You were running slower than usual, yet your heart rate continued to climb aggressively.',
+                'takeaway': 'This is a mechanical warning light. It often signals dehydration, lack of sleep, or accumulated fatigue. Prioritize rest or sleep over intensity tomorrow.',
                 'color': 'text-red-400',
                 'bg': 'bg-red-500/10',
                 'border': 'border-red-500/30',
@@ -4097,41 +4181,60 @@ Lower is better (<5% is solid). Your heart is working harder to maintain the sam
             with ui.column().classes('gap-3'):
                 ui.label('Understanding Aerobic Efficiency').classes('text-xl font-bold text-white')
                 ui.separator().classes('bg-zinc-700')
-                
-                # EF Explanation
-                with ui.column().classes('gap-1'):
-                    ui.label('EFFICIENCY FACTOR (EF)').classes('text-[10px] font-bold text-zinc-500 tracking-widest')
-                    ui.label('Speed ÷ Heart Rate — how much pace you get per heartbeat. Higher is better. Improving EF over weeks means your aerobic engine is growing.').classes('text-sm text-zinc-300 leading-relaxed')
-                
-                # Decoupling Explanation
-                with ui.column().classes('gap-1 mt-1'):
-                    ui.label('AEROBIC DECOUPLING').classes('text-[10px] font-bold text-zinc-500 tracking-widest')
-                    ui.label('Cardiac drift — how much your heart rate rises while pace stays steady. Compares 1st half EF to 2nd half EF. Target < 5% for endurance fitness.').classes('text-sm text-zinc-300 leading-relaxed')
-                
-                ui.separator().classes('bg-zinc-700 mt-1')
+
+                # Neutral context block (kept intentionally low-contrast)
+                with ui.element('div').classes('w-full rounded-lg border border-zinc-800 bg-zinc-950/45 p-4'):
+                    with ui.column().classes('gap-3'):
+                        with ui.column().classes('gap-1'):
+                            ui.label('EFFICIENCY FACTOR (EF)').classes('text-[10px] font-bold text-zinc-500 tracking-[0.18em]')
+                            ui.label('Speed ÷ Heart Rate — how much pace you get per heartbeat. Higher is better. Improving EF over weeks means your aerobic engine is growing.').classes('text-sm text-zinc-300 leading-relaxed')
+
+                        ui.separator().classes('bg-zinc-800')
+
+                        with ui.column().classes('gap-1'):
+                            ui.label('AEROBIC DECOUPLING').classes('text-[10px] font-bold text-zinc-500 tracking-[0.18em]')
+                            ui.label('Cardiac drift — how much your heart rate rises while pace stays steady. Compares 1st half EF to 2nd half EF. Target < 5% for endurance fitness.').classes('text-sm text-zinc-300 leading-relaxed')
+
+                ui.separator().classes('bg-zinc-700')
                 
                 # Verdict Cards
                 ui.label('VERDICTS').classes('text-[10px] font-bold text-zinc-500 tracking-widest')
                 
                 for v in verdicts:
-                    is_highlighted = highlight_verdict and v['key'] == highlight_verdict
-                    ring = 'ring-2 ring-white/30' if is_highlighted else ''
-                    scale = 'scale-[1.02]' if is_highlighted else 'opacity-80'
-                    
-                    with ui.row().classes(f'items-start gap-3 p-3 rounded-lg border {v["bg"]} {v["border"]} {ring} {scale} transition-all'):
+                    is_highlighted = bool(normalized_highlight) and v['key'].upper() == normalized_highlight
+                    if is_highlighted:
+                        row_classes = (
+                            f'items-start gap-3 p-3 rounded-lg border {v["bg"]} {v["border"]} '
+                            'ring-2 ring-white/25 scale-[1.01] shadow-lg shadow-black/20 transition-all'
+                        )
+                        desc_classes = 'text-xs text-zinc-100 leading-relaxed mt-0.5'
+                        takeaway_wrap = 'w-full mt-2 rounded-md border border-white/12 bg-black/20 px-2.5 py-2'
+                        takeaway_label = f'text-[10px] font-bold uppercase tracking-wider {v["color"]} mb-1'
+                        takeaway_text = 'text-xs text-zinc-100 leading-relaxed'
+                    else:
+                        row_classes = 'items-start gap-3 p-3 rounded-lg border bg-zinc-900/35 border-zinc-700/80 transition-all'
+                        desc_classes = 'text-xs text-zinc-400 leading-relaxed mt-0.5'
+                        takeaway_wrap = 'w-full mt-2 rounded-md border border-zinc-700/70 bg-zinc-900/60 px-2.5 py-2'
+                        takeaway_label = 'text-[10px] font-bold uppercase tracking-wider text-zinc-400 mb-1'
+                        takeaway_text = 'text-xs text-zinc-300 leading-relaxed'
+
+                    with ui.row().classes(row_classes):
                         ui.label(v['icon']).classes('text-lg mt-0.5')
                         with ui.column().classes('gap-0.5 flex-1'):
-                            with ui.row().classes('items-center gap-2'):
+                            with ui.row().classes('items-center gap-2 flex-wrap'):
                                 ui.label(v['key']).classes(f'text-sm font-bold {v["color"]}')
-                                ui.label(f'— {v["condition"]}').classes('text-xs text-zinc-500')
-                            ui.label(v['meaning']).classes('text-xs text-zinc-400 leading-relaxed')
+                            ui.label(v['description']).classes(desc_classes)
+                            with ui.element('div').classes(takeaway_wrap):
+                                ui.label('Takeaway').classes(takeaway_label)
+                                ui.label(v['takeaway']).classes(takeaway_text)
                 
                 # Tip
-                with ui.row().classes('items-start gap-2 mt-2 p-3 bg-blue-500/10 rounded-lg border border-blue-500/20'):
-                    ui.icon('lightbulb').classes('text-blue-400 text-sm mt-0.5')
-                    ui.label('The trend graph plots each run as a dot using these two axes. Click any dot to see that activity\'s details.').classes('text-sm italic text-blue-200 flex-1')
+                if from_trends:
+                    with ui.row().classes('items-start gap-2 mt-4 p-3 bg-blue-500/10 rounded-lg border border-blue-500/20'):
+                        ui.icon('lightbulb').classes('text-blue-400 text-sm mt-0.5')
+                        ui.label('The trend graph plots each run as a dot using these two axes. Click any dot to see that activity\'s details.').classes('text-sm italic text-blue-200 flex-1')
                 
-                ui.button('GOT IT', on_click=dialog.close).classes('mt-3 w-full bg-zinc-800 hover:bg-zinc-700 text-white font-bold')
+                ui.button('GOT IT', on_click=dialog.close).classes('mt-6 w-full bg-zinc-800 hover:bg-zinc-700 text-white font-bold')
         
         dialog.open()
     
@@ -4140,6 +4243,20 @@ Lower is better (<5% is solid). Your heart is working harder to maintain the sam
         Show informational modal explaining Running Form verdicts.
         If highlight_verdict is provided, that verdict section gets visually emphasized.
         """
+        normalized_highlight = (highlight_verdict or '').strip().upper()
+        verdict_aliases = {
+            'ELITE': 'ELITE FORM',
+            'GOOD': 'GOOD FORM',
+            'IMPROVING': 'GOOD FORM',
+            'SLIPPING': 'HEAVY FEET',
+            'BROKEN': 'HEAVY FEET',
+            'LOW CADENCE': 'HEAVY FEET',
+            'OVERSTRIDING': 'HEAVY FEET',
+            'INEFFICIENT': 'HEAVY FEET',
+            'AEROBIC / MIXED': 'HIKING / REST',
+        }
+        normalized_highlight = verdict_aliases.get(normalized_highlight, normalized_highlight)
+
         verdicts = [
             {
                 'key': 'Elite Form',
@@ -4207,7 +4324,9 @@ Lower is better (<5% is solid). Your heart is working harder to maintain the sam
                 ui.label('VERDICTS').classes('text-[10px] font-bold text-zinc-500 tracking-widest')
                 
                 for v in verdicts:
-                    is_highlighted = highlight_verdict and (v['key'] == highlight_verdict or v['raw'] == highlight_verdict)
+                    is_highlighted = bool(normalized_highlight) and (
+                        v['raw'] == normalized_highlight or v['key'].upper() == normalized_highlight
+                    )
                     ring = 'ring-2 ring-white/30' if is_highlighted else ''
                     scale = 'scale-[1.02]' if is_highlighted else 'opacity-80'
                     
@@ -4992,7 +5111,9 @@ Activity Breakdown: {activity_breakdown}
         1. Passes 'Category Name' to click handler for better Modal Titles.
         2. Adds 'cursor-pointer' to the chart for better UX.
         """
+        self.volume_week_starts = []
         if self.df is None or self.df.empty:
+            self.weekly_volume_data = None
             return None
         
         # ... (Data prep code remains the same until Chart Data construction) ...
@@ -5038,6 +5159,7 @@ Activity Breakdown: {activity_breakdown}
                 })
 
         if not split_data:
+            self.weekly_volume_data = None
             return None
             
         df_splits = pd.DataFrame(split_data)
@@ -5051,6 +5173,7 @@ Activity Breakdown: {activity_breakdown}
         # 2. AGGREGATE FOR CHART
         grouped = df_splits.groupby(['week_start', 'category'])
         weeks = sorted(df_splits['week_start'].unique())
+        self.volume_week_starts = [pd.Timestamp(week) for week in weeks]
         categories = ['HIGH QUALITY', 'STRUCTURAL', 'BROKEN']
         
         chart_data = {cat: {'y': [], 'customdata': []} for cat in categories}
@@ -5126,6 +5249,8 @@ Activity Breakdown: {activity_breakdown}
     def generate_training_mix_chart(self):
         """Generate weekly volume chart grouped by RUN TYPE (Training Mix lens).
         Uses purple/pink/indigo palette to visually distinguish from Quality lens."""
+        self.volume_week_starts = []
+        self.weekly_mix_data = None
         if self.df is None or self.df.empty or not self.activities_data:
             return None
         
@@ -5181,6 +5306,13 @@ Activity Breakdown: {activity_breakdown}
         # Group and build chart data
         grouped = df_mix.groupby(['week_start', 'category'])
         weeks = sorted(df_mix['week_start'].unique())
+        self.volume_week_starts = [pd.Timestamp(week) for week in weeks]
+
+        weekly_mix = df_mix.groupby(['week_start', 'category'])['distance'].sum().unstack(fill_value=0)
+        for col in categories:
+            if col not in weekly_mix.columns:
+                weekly_mix[col] = 0
+        self.weekly_mix_data = weekly_mix
         
         chart_data = {cat: {'y': [], 'customdata': []} for cat in categories}
         week_labels = []
@@ -5258,6 +5390,8 @@ Activity Breakdown: {activity_breakdown}
     def generate_load_chart(self):
         """Generate weekly volume chart grouped by LOAD CATEGORY (Load lens).
         Uses teal/cyan palette to visually distinguish from Quality and Mix lenses."""
+        self.volume_week_starts = []
+        self.weekly_load_data = None
         if self.df is None or self.df.empty or not self.activities_data:
             return None
         
@@ -5305,6 +5439,13 @@ Activity Breakdown: {activity_breakdown}
         
         grouped = df_load.groupby(['week_start', 'category'])
         weeks = sorted(df_load['week_start'].unique())
+        self.volume_week_starts = [pd.Timestamp(week) for week in weeks]
+
+        weekly_load = df_load.groupby(['week_start', 'category'])['distance'].sum().unstack(fill_value=0)
+        for col in categories:
+            if col not in weekly_load.columns:
+                weekly_load[col] = 0
+        self.weekly_load_data = weekly_load
         
         chart_data = {cat: {'y': [], 'customdata': []} for cat in categories}
         week_labels = []
@@ -5363,117 +5504,105 @@ Activity Breakdown: {activity_breakdown}
         
         return fig
 
-    def calculate_mix_verdict(self, df):
-        """Calculate verdict for Training Mix lens — checks 80/20 distribution."""
-        if df is None or df.empty or not self.activities_data:
-            return 'N/A', '#71717a', 'bg-zinc-700'
-        
+    def calculate_mix_verdict(self, df=None, start_index=None, end_index=None):
+        """Calculate mix verdict from the currently visible stacked-bar mileage."""
         try:
-            distances = [a.get('distance_mi', 0) for a in self.activities_data if a.get('distance_mi', 0) > 0]
-            long_run_threshold = max(10, sorted(distances)[int(len(distances) * 0.8)] if len(distances) >= 5 else 10)
-            
-            total_miles = 0
-            easy_miles = 0   # Recovery + Base
-            hard_miles = 0   # Tempo + Intervals
-            steady_miles = 0
-            long_miles = 0
-            
-            for activity in self.activities_data:
-                dist = activity.get('distance_mi', 0)
-                if dist < 0.1:
-                    continue
-                total_miles += dist
-                
-                full_tag = self.classify_run_type(activity, long_run_threshold)
-                primary = full_tag.split(' | ')[0] if full_tag else '🟡 Base'
-                clean_primary = primary.split(' ', 1)[-1] if ' ' in primary else primary
-                
-                if clean_primary in ('Recovery', 'Base'):
-                    easy_miles += dist
-                elif clean_primary == 'Tempo':
-                    hard_miles += dist
-                elif clean_primary == 'Steady':
-                    steady_miles += dist
-                elif clean_primary == 'Long Run':
-                    long_miles += dist
-            
-            if total_miles < 1:
+            categories = ['Recovery', 'Base', 'Steady', 'Long Run', 'Tempo']
+            data = self._slice_lens_weekly_data(self.weekly_mix_data, start_index, end_index)
+            if data is None or data.empty:
                 return 'N/A', '#71717a', 'bg-zinc-700'
-            
+
+            for col in categories:
+                if col not in data.columns:
+                    data[col] = 0
+
+            total_miles = data[categories].sum().sum()
+            if total_miles <= 0:
+                return 'N/A', '#71717a', 'bg-zinc-700'
+
+            recovery_miles = data['Recovery'].sum()
+            base_miles = data['Base'].sum()
+            steady_miles = data['Steady'].sum()
+            long_miles = data['Long Run'].sum()
+            tempo_miles = data['Tempo'].sum()
+
+            easy_miles = recovery_miles + base_miles + long_miles
+            intensity_miles = steady_miles + tempo_miles
+
             easy_pct = (easy_miles / total_miles) * 100
-            hard_pct = (hard_miles / total_miles) * 100
-            tempo_threshold_pct = ((hard_miles + steady_miles) / total_miles) * 100
-            
-            # Tempo Heavy: >40% combined Tempo+Steady without enough easy
-            if tempo_threshold_pct > 40 and easy_pct < 50:
+            intensity_pct = (intensity_miles / total_miles) * 100
+            dominant_pct = max((data[c].sum() / total_miles) * 100 for c in categories)
+
+            if intensity_pct >= 45 and intensity_pct > easy_pct:
                 return 'TEMPO HEAVY', '#ef4444', 'bg-red-500/20'
-            
-            # Polarized: >=60% easy + some hard work (great for ultra runners)
-            if easy_pct >= 60 and hard_miles > 0:
+
+            if easy_pct >= 65 and tempo_miles > 0 and intensity_pct <= 35:
                 return 'POLARIZED', '#10b981', 'bg-emerald-500/20'
-            
-            # Monotone: almost all one type
-            if easy_pct > 85:
+
+            if dominant_pct >= 85:
                 return 'MONOTONE', '#f97316', 'bg-orange-500/20'
-            
-            # Default: balanced
+
             return 'BALANCED', '#3b82f6', 'bg-blue-500/20'
-            
+
         except:
             return 'N/A', '#71717a', 'bg-zinc-700'
 
-    def calculate_load_verdict(self, df):
-        """Calculate verdict for Load lens — checks stress distribution."""
-        if df is None or df.empty or not self.activities_data:
-            return 'N/A', '#71717a', 'bg-zinc-700'
-        
+    def calculate_load_verdict(self, df=None, start_index=None, end_index=None):
+        """Calculate load verdict from visible stacked-bar mileage (distance-weighted)."""
         try:
-            total_runs = 0
-            recovery_runs = 0
-            maintenance_runs = 0
-            productive_runs = 0
-            overreaching_runs = 0
-            
-            for activity in self.activities_data:
-                dist = activity.get('distance_mi', 0)
-                if dist < 0.1:
-                    continue
-                total_runs += 1
-                strain = self._calculate_strain(activity)
-                
-                if strain < 75: recovery_runs += 1
-                elif strain < 150: maintenance_runs += 1
-                elif strain < 300: productive_runs += 1
-                else: overreaching_runs += 1
-            
-            if total_runs < 2:
+            categories = ['Recovery', 'Maintenance', 'Productive', 'Overreaching']
+            data = self._slice_lens_weekly_data(self.weekly_load_data, start_index, end_index)
+            if data is None or data.empty:
                 return 'N/A', '#71717a', 'bg-zinc-700'
-            
-            overreach_pct = (overreaching_runs / total_runs) * 100
-            productive_pct = (productive_runs / total_runs) * 100
-            easy_pct = ((recovery_runs + maintenance_runs) / total_runs) * 100
-            
-            # Overreaching: too much overreaching
-            if overreach_pct > 25:
+
+            for col in categories:
+                if col not in data.columns:
+                    data[col] = 0
+
+            total_miles = data[categories].sum().sum()
+            if total_miles <= 0:
+                return 'N/A', '#71717a', 'bg-zinc-700'
+
+            recovery = data['Recovery'].sum()
+            maintenance = data['Maintenance'].sum()
+            productive = data['Productive'].sum()
+            overreaching = data['Overreaching'].sum()
+
+            recovery_pct = (recovery / total_miles) * 100
+            maintenance_pct = (maintenance / total_miles) * 100
+            productive_pct = (productive / total_miles) * 100
+            overreach_pct = (overreaching / total_miles) * 100
+            easy_pct = recovery_pct + maintenance_pct
+
+            if (
+                overreach_pct >= 20
+                and overreach_pct >= productive_pct
+                and overreach_pct >= maintenance_pct
+                and overreach_pct >= recovery_pct
+            ):
                 return 'OVERREACHING', '#ef4444', 'bg-red-500/20'
-            
-            # Productive: heavy productive volume
-            if productive_pct > 40:
+
+            if (
+                productive_pct >= 20
+                and productive_pct >= maintenance_pct
+                and productive_pct >= recovery_pct
+                and productive_pct >= overreach_pct
+            ):
                 return 'PRODUCTIVE', '#f97316', 'bg-orange-500/20'
-            
-            # Undertrained: all easy, no stimulus
-            if easy_pct > 90 and productive_runs == 0:
+
+            if easy_pct >= 85 and productive_pct < 8 and overreach_pct < 5:
                 return 'UNDERTRAINED', '#3b82f6', 'bg-blue-500/20'
-            
-            # Maintaining: healthy balance
+
             return 'MAINTAINING', '#10b981', 'bg-emerald-500/20'
-            
+
         except:
             return 'N/A', '#71717a', 'bg-zinc-700'
 
     def generate_hr_zones_chart(self):
         """Generate weekly volume chart grouped by HEART RATE ZONE (HR Zones lens).
         Y-axis = minutes. Each activity assigned to dominant zone via avg_hr/max_hr ratio."""
+        self.volume_week_starts = []
+        self.weekly_hr_zones_data = None
         if self.df is None:
             return None
         if self.df.empty:
@@ -5525,20 +5654,27 @@ Activity Breakdown: {activity_breakdown}
         colors = {
             'Zone 1': '#60a5fa',  # Blue — easy/warmup
             'Zone 2': '#34d399',  # Emerald — aerobic base
-            'Zone 3': '#fbbf24',  # Amber — threshold/gray zone ⚠️
+            'Zone 3': '#64748b',  # Slate — garbage miles/gray zone 🌫️
             'Zone 4': '#f97316',  # Orange — hard
             'Zone 5': '#ef4444',  # Red — max effort
         }
         descriptions = {
             'Zone 1': 'Easy (<60% max HR)',
             'Zone 2': 'Aerobic (60-70% max HR)',
-            'Zone 3': 'Threshold (70-80% max HR)',
+            'Zone 3': 'The Grey Zone (70-80% max HR)',
             'Zone 4': 'Hard (80-90% max HR)',
             'Zone 5': 'Max effort (>90% max HR)',
         }
         
         grouped = df_zones.groupby(['week_start', 'zone'])
         weeks = sorted(df_zones['week_start'].unique())
+        self.volume_week_starts = [pd.Timestamp(week) for week in weeks]
+
+        weekly_zones = df_zones.groupby(['week_start', 'zone'])['minutes'].sum().unstack(fill_value=0)
+        for col in categories:
+            if col not in weekly_zones.columns:
+                weekly_zones[col] = 0
+        self.weekly_hr_zones_data = weekly_zones
         
         chart_data = {cat: {'y': [], 'customdata': []} for cat in categories}
         week_labels = []
@@ -5597,68 +5733,102 @@ Activity Breakdown: {activity_breakdown}
         
         return fig
 
-    def calculate_hr_zones_verdict(self, df):
-        """Calculate verdict for HR Zones lens — checks zone distribution."""
-        if df is None or df.empty or not self.activities_data:
-            return 'N/A', '#71717a', 'bg-zinc-700'
-        
+    def calculate_hr_zones_verdict(self, df=None, start_index=None, end_index=None):
+        """Calculate HR zones verdict from visible stacked-bar minutes."""
         try:
-            z1_time = 0
-            z2_time = 0
-            z3_time = 0
-            z4_time = 0
-            z5_time = 0
-            total_time = 0
-            
-            for activity in self.activities_data:
-                moving_time = activity.get('moving_time_min', 0)
-                avg_hr = activity.get('avg_hr', 0)
-                max_hr = activity.get('max_hr', 185)
-                if not avg_hr or not max_hr or max_hr == 0 or moving_time < 1:
-                    continue
-                
-                total_time += moving_time
-                ratio = avg_hr / max_hr
-                if ratio < 0.60:
-                    z1_time += moving_time
-                elif ratio < 0.70:
-                    z2_time += moving_time
-                elif ratio < 0.80:
-                    z3_time += moving_time
-                elif ratio < 0.90:
-                    z4_time += moving_time
-                else:
-                    z5_time += moving_time
-            
-            if total_time < 1:
+            categories = ['Zone 1', 'Zone 2', 'Zone 3', 'Zone 4', 'Zone 5']
+            data = self._slice_lens_weekly_data(self.weekly_hr_zones_data, start_index, end_index)
+            if data is None or data.empty:
                 return 'N/A', '#71717a', 'bg-zinc-700'
-            
-            easy_pct = ((z1_time + z2_time) / total_time) * 100
-            z3_pct = (z3_time / total_time) * 100
-            z4_pct = (z4_time / total_time) * 100
-            z5_pct = (z5_time / total_time) * 100
-            
-            # Zone 5 Redlining: >15% in Zone 5 (truly maximal effort)
-            if z5_pct > 15:
-                return 'ZONE 5 REDLINING', '#ef4444', 'bg-red-500/20'
-            
-            # Zone 4 Threshold Addict: >25% in Zone 4
-            if z4_pct > 25:
-                return 'ZONE 4 THRESHOLD ADDICT', '#f97316', 'bg-orange-500/20'
-            
-            # Zone 3 Junk: >30% in the gray zone
-            if z3_pct > 30:
-                return 'ZONE 3 JUNK', '#fbbf24', 'bg-amber-500/20'
-            
-            # Zone 2 Base: >=85% in Z1+Z2 with very little intensity
+
+            for col in categories:
+                if col not in data.columns:
+                    data[col] = 0
+
+            total_time = data[categories].sum().sum()
+            if total_time <= 0:
+                return 'N/A', '#71717a', 'bg-zinc-700'
+
+            z1 = data['Zone 1'].sum()
+            z2 = data['Zone 2'].sum()
+            z3 = data['Zone 3'].sum()
+            z4 = data['Zone 4'].sum()
+            z5 = data['Zone 5'].sum()
+
+            easy_pct = ((z1 + z2) / total_time) * 100
+            z3_pct = (z3 / total_time) * 100
+            z4_pct = (z4 / total_time) * 100
+            z5_pct = (z5 / total_time) * 100
+            hard_pct = z4_pct + z5_pct
+
             if easy_pct >= 85:
                 return 'ZONE 2 BASE', '#3b82f6', 'bg-blue-500/20'
-            
-            # 80/20 Balanced: healthy distribution
+
+            if 70 <= easy_pct <= 90 and 10 <= hard_pct <= 30 and z3_pct < 25:
+                return '80/20 BALANCED', '#10b981', 'bg-emerald-500/20'
+
+            bucket_values = {
+                'easy': easy_pct,
+                'z3': z3_pct,
+                'z4': z4_pct,
+                'z5': z5_pct,
+            }
+            dominant_bucket = max(bucket_values, key=bucket_values.get)
+
+            if dominant_bucket == 'z5' and z5_pct >= 12:
+                return 'ZONE 5 REDLINING', '#ef4444', 'bg-red-500/20'
+
+            if dominant_bucket == 'z4' and z4_pct >= 20:
+                return 'ZONE 4 THRESHOLD ADDICT', '#f97316', 'bg-orange-500/20'
+
+            if dominant_bucket == 'z3' and z3_pct >= 25:
+                return 'ZONE 3 JUNK', '#64748b', 'bg-slate-500/20'
+
+            if dominant_bucket == 'easy':
+                return 'ZONE 2 BASE', '#3b82f6', 'bg-blue-500/20'
+
             return '80/20 BALANCED', '#10b981', 'bg-emerald-500/20'
-            
+
         except:
             return 'N/A', '#71717a', 'bg-zinc-700'
+
+    def _get_volume_zoom_indices(self, relayout_args):
+        """Extract categorical x-axis zoom indices from a Plotly relayout payload."""
+        if not relayout_args:
+            return None, None
+
+        if 'xaxis.range[0]' in relayout_args and 'xaxis.range[1]' in relayout_args:
+            return relayout_args.get('xaxis.range[0]'), relayout_args.get('xaxis.range[1]')
+
+        x_range = relayout_args.get('xaxis.range')
+        if isinstance(x_range, (list, tuple)) and len(x_range) >= 2:
+            return x_range[0], x_range[1]
+
+        return None, None
+
+    def _slice_lens_weekly_data(self, weekly_data, start_index=None, end_index=None):
+        """Slice a lens weekly dataframe to the currently zoomed categorical week window."""
+        if weekly_data is None or weekly_data.empty:
+            return None
+
+        data = weekly_data.copy()
+
+        if self.volume_week_starts:
+            data = data.reindex(self.volume_week_starts, fill_value=0)
+
+        if start_index is None or end_index is None:
+            return data
+
+        try:
+            start = max(0, int(round(float(start_index))))
+            end = min(len(data), int(round(float(end_index))) + 1)
+        except (TypeError, ValueError):
+            return data
+
+        if end <= start:
+            return data.iloc[0:0]
+
+        return data.iloc[start:end]
 
     def refresh_volume_card(self):
         """Surgically refresh only the volume card content based on current lens."""
@@ -5687,7 +5857,11 @@ Activity Breakdown: {activity_breakdown}
             
             # Update verdict badge
             if hasattr(self, 'volume_verdict_label'):
-                self.volume_verdict_label.text = f'{verdict}'
+                self.volume_verdict_label.set_text(f'{verdict}')
+                self.volume_verdict_label.classes(
+                    f'text-sm font-bold px-3 py-1 rounded {v_bg}',
+                    remove='bg-emerald-500/20 bg-blue-500/20 bg-red-500/20 bg-orange-500/20 bg-amber-500/20 bg-slate-500/20 bg-zinc-700 bg-zinc-800 text-zinc-500'
+                )
                 self.volume_verdict_label.style(replace=f'color: {v_color};')
             
             # Update subtitle
@@ -6501,22 +6675,25 @@ Activity Breakdown: {activity_breakdown}
             
             # 1. The Holy Grail: EF rising, decoupling stable or dropping
             if slope_ef_per_week > 0.5 and slope_dec_per_week < 0.3:
-                return 'PEAKING', '#10b981', 'bg-emerald-500/20'
+                return 'EFFICIENT', '#10b981', 'bg-emerald-500/20'
             
             # 2. Building Speed: EF rising fast, some drift is acceptable (progressive overload)
             if slope_ef_per_week > 1.0 and slope_dec_per_week > 0.3:
-                return 'BUILDING', '#f97316', 'bg-orange-500/20'
+                return 'PUSHING', '#f97316', 'bg-orange-500/20'
             
             # 3. Fitness Loss: EF clearly declining
             if slope_ef_per_week < -0.5:
-                return 'DETRAINING', '#ef4444', 'bg-red-500/20'
+                # Renamed DETRAINING -> FATIGUED to match single-run terms
+                return 'FATIGUED', '#ef4444', 'bg-red-500/20'
             
             # 4. Pure Drift: EF flat but decoupling increasing significantly
             if abs(slope_ef_per_week) <= 0.5 and slope_dec_per_week > 1.0:
-                return 'DRIFTING', '#ef4444', 'bg-red-500/20'
+                # Renamed DRIFTING -> FATIGUED to match single-run terms
+                return 'FATIGUED', '#ef4444', 'bg-red-500/20'
             
             # 5. Default: modest gains or flat, manageable drift
-            return 'STABLE', '#3b82f6', 'bg-blue-500/20'
+            # Renamed STABLE -> BASE to match single-run terms
+            return 'BASE', '#3b82f6', 'bg-blue-500/20'
             
         except:
             return 'N/A', '#71717a', 'bg-zinc-700'
@@ -6603,7 +6780,9 @@ Activity Breakdown: {activity_breakdown}
                             
                             # Info Icon (inline)
                             ui.icon('help_outline').classes('text-zinc-500 hover:text-white transition-colors duration-200 cursor-pointer text-xl ml-auto').on(
-                                'click', lambda: self.show_volume_info()
+                                'click', lambda: self.show_volume_info(
+                                    highlight_verdict=self.volume_verdict_label.text if hasattr(self, 'volume_verdict_label') else None
+                                )
                             )
                         
                         # Subtitle (lens-adaptive)
@@ -6624,7 +6803,7 @@ Activity Breakdown: {activity_breakdown}
                         
                         self._lens_buttons = {}
                         with ui.row().classes('w-full gap-1 mb-4 p-1 bg-zinc-800/50 rounded-full').style('width: fit-content;'):
-                            for lens_key, lens_label in [('quality', 'Quality'), ('mix', 'Training Mix'), ('load', 'Load'), ('zones', 'HR Zones')]:
+                            for lens_key, lens_label in [('quality', 'Quality'), ('zones', 'HR Zones'), ('load', 'Load'), ('mix', 'Training Mix')]:
                                 is_active = self.volume_lens == lens_key
                                 btn = ui.button(lens_label, on_click=lambda lk=lens_key: switch_lens(lk)).props('flat no-caps')
                                 if is_active:
@@ -6652,9 +6831,22 @@ Activity Breakdown: {activity_breakdown}
                         # Header with verdict badge
                         with ui.row().classes('w-full items-center gap-3 mb-1'):
                             ui.label('Aerobic Efficiency').classes('text-xl font-bold text-white')
-                            self.efficiency_verdict_label = ui.label(f'{eff_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {eff_bg}').style(f'color: {eff_color};')
+                            self.efficiency_verdict_label = ui.label(f'{eff_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {eff_bg}').style(f'color: {eff_color}; cursor: pointer;')
+                            self.efficiency_verdict_label.on(
+                                'click',
+                                lambda: self.show_aerobic_efficiency_info(
+                                    highlight_verdict=self.efficiency_verdict_label.text if hasattr(self, 'efficiency_verdict_label') else None,
+                                    from_trends=True
+                                )
+                            )
                             ae_info_icon = ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-lg transition-colors')
-                            ae_info_icon.on('click', lambda: self.show_aerobic_efficiency_info())
+                            ae_info_icon.on(
+                                'click',
+                                lambda: self.show_aerobic_efficiency_info(
+                                    highlight_verdict=self.efficiency_verdict_label.text if hasattr(self, 'efficiency_verdict_label') else None,
+                                    from_trends=True
+                                )
+                            )
                         ui.label('Running efficiency vs. cardiovascular drift over time').classes('text-sm text-zinc-400 mb-4')
                         
                         # Calculate consistency text for EF
@@ -6719,9 +6911,20 @@ Activity Breakdown: {activity_breakdown}
                         # Header with verdict badge
                         with ui.row().classes('w-full items-center gap-3 mb-1'):
                             ui.label('Running Mechanics').classes('text-xl font-bold text-white')
-                            self.cadence_verdict_label = ui.label(f'{cad_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {cad_bg}').style(f'color: {cad_color};')
+                            self.cadence_verdict_label = ui.label(f'{cad_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {cad_bg}').style(f'color: {cad_color}; cursor: pointer;')
+                            self.cadence_verdict_label.on(
+                                'click',
+                                lambda: self.show_form_info(
+                                    highlight_verdict=self.cadence_verdict_label.text if hasattr(self, 'cadence_verdict_label') else None
+                                )
+                            )
                             form_info_icon = ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-lg transition-colors')
-                            form_info_icon.on('click', lambda: self.show_form_info())
+                            form_info_icon.on(
+                                'click',
+                                lambda: self.show_form_info(
+                                    highlight_verdict=self.cadence_verdict_label.text if hasattr(self, 'cadence_verdict_label') else None
+                                )
+                            )
                         ui.label('Cadence trend showing turnover consistency').classes('text-sm text-zinc-400 mb-4')
                         
                         # Chart with zoom binding
@@ -6812,9 +7015,10 @@ Activity Breakdown: {activity_breakdown}
             # Update Efficiency Verdict
             df_for_verdict = df_zoomed if 'xaxis.range[0]' in e.args else self.df
             eff_verdict, eff_color, eff_bg = self.calculate_efficiency_verdict(df_for_verdict)
-            self.efficiency_verdict_label.set_text(f'{eff_verdict}')
-            self.efficiency_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {eff_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-red-500/20 bg-zinc-700')
-            self.efficiency_verdict_label.style(f'color: {eff_color};')
+            self.efficiency_verdict_label.set_text(eff_verdict)
+            self.efficiency_verdict_label.classes(remove='bg-emerald-500/20 bg-orange-500/20 bg-red-500/20 bg-blue-500/20 bg-zinc-700', add=eff_bg)
+            self.efficiency_verdict_label.style(f'color: {eff_color}; cursor: pointer;')
+            self.efficiency_verdict_label.on('click', lambda: self.show_aerobic_efficiency_info(highlight_verdict=eff_verdict, from_trends=True), replace=True)
                 
         except Exception as ex:
             # Silently catch errors
@@ -6827,17 +7031,27 @@ Activity Breakdown: {activity_breakdown}
         Lens-aware: uses the correct verdict calculator for the current lens.
         """
         try:
+            idx_start, idx_end = self._get_volume_zoom_indices(e.args)
+            has_zoom_range = idx_start is not None and idx_end is not None
+
             # Determine the correct verdict calculator based on current lens
             if self.volume_lens == 'mix':
-                vol_verdict, vol_color, vol_bg = self.calculate_mix_verdict(self.df)
+                if has_zoom_range:
+                    vol_verdict, vol_color, vol_bg = self.calculate_mix_verdict(start_index=idx_start, end_index=idx_end)
+                else:
+                    vol_verdict, vol_color, vol_bg = self.calculate_mix_verdict()
             elif self.volume_lens == 'load':
-                vol_verdict, vol_color, vol_bg = self.calculate_load_verdict(self.df)
+                if has_zoom_range:
+                    vol_verdict, vol_color, vol_bg = self.calculate_load_verdict(start_index=idx_start, end_index=idx_end)
+                else:
+                    vol_verdict, vol_color, vol_bg = self.calculate_load_verdict()
             elif self.volume_lens == 'zones':
-                vol_verdict, vol_color, vol_bg = self.calculate_hr_zones_verdict(self.df)
-            elif 'xaxis.range[0]' in e.args and 'xaxis.range[1]' in e.args:
+                if has_zoom_range:
+                    vol_verdict, vol_color, vol_bg = self.calculate_hr_zones_verdict(start_index=idx_start, end_index=idx_end)
+                else:
+                    vol_verdict, vol_color, vol_bg = self.calculate_hr_zones_verdict()
+            elif has_zoom_range:
                 # Quality lens with zoom — recalculate with slice
-                idx_start = e.args['xaxis.range[0]']
-                idx_end = e.args['xaxis.range[1]']
                 vol_verdict, vol_color, vol_bg = self.calculate_volume_verdict(
                     start_index=idx_start, 
                     end_index=idx_end
@@ -6848,7 +7062,7 @@ Activity Breakdown: {activity_breakdown}
             
             # Update UI
             self.volume_verdict_label.set_text(f'{vol_verdict}')
-            self.volume_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-red-500/20 bg-orange-500/20 bg-zinc-700 bg-zinc-800 text-zinc-500')
+            self.volume_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-red-500/20 bg-orange-500/20 bg-amber-500/20 bg-slate-500/20 bg-zinc-700 bg-zinc-800 text-zinc-500')
             self.volume_verdict_label.style(f'color: {vol_color};')
             
         except Exception as ex:
@@ -6885,8 +7099,9 @@ Activity Breakdown: {activity_breakdown}
             
             # Update verdict label
             self.cadence_verdict_label.set_text(f'{cad_verdict}')
-            self.cadence_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {cad_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-red-500/20 bg-zinc-700')
-            self.cadence_verdict_label.style(f'color: {cad_color};')
+            self.cadence_verdict_label.classes(f'text-sm font-bold px-3 py-1 rounded {cad_bg}', remove='bg-emerald-500/20 bg-blue-500/20 bg-yellow-500/20 bg-orange-500/20 bg-red-500/20 bg-zinc-700')
+            self.cadence_verdict_label.style(f'color: {cad_color}; cursor: pointer;')
+            self.cadence_verdict_label.on('click', lambda: self.show_form_info(highlight_verdict=cad_verdict), replace=True)
                 
         except Exception as ex:
             # Silently catch errors
@@ -7252,13 +7467,38 @@ TRAINING ZONES:
                 return
 
             # Scenario B: Selector Menu
-            style_map = {
-                'High Quality Miles': ('text-emerald-400', 'bg-emerald-500/20', 'border-emerald-500/30'),
-                'Structural Miles': ('text-blue-400', 'bg-blue-500/20', 'border-blue-500/30'),
-                'Broken Miles': ('text-red-400', 'bg-red-500/20', 'border-red-500/30')
+            style_config = {
+                # Quality Lens
+                'HIGH QUALITY': ('High Quality Miles', '#10b981', 'bg-emerald-500/20'),
+                'STRUCTURAL':   ('Structural Miles',   '#3b82f6', 'bg-blue-500/20'),
+                'BROKEN':       ('Broken Miles',       '#ef4444', 'bg-red-500/20'),
+                
+                # Training Mix Lens
+                'Recovery': ('Recovery Miles', '#60a5fa', 'bg-blue-500/20'),
+                'Base':     ('Base Miles',     '#a78bfa', 'bg-violet-500/20'),
+                'Steady':   ('Steady Miles',   '#f59e0b', 'bg-amber-500/20'),
+                'Long Run': ('Long Run Miles', '#34d399', 'bg-emerald-500/20'),
+                'Tempo':    ('Tempo Miles',    '#f43f5e', 'bg-rose-500/20'),
+                
+                # Load Lens
+                'Maintenance':  ('Maintenance',    '#10B981', 'bg-emerald-500/20'),
+                'Productive':   ('Productive',     '#f97316', 'bg-orange-500/20'),
+                'Overreaching': ('Overreaching',   '#ef4444', 'bg-red-500/20'),
+                # 'Recovery' is shared with Mix but needs consistent styling
+                
+                # HR Zones Lens
+                'Zone 1': ('Zone 1 (Easy)',      '#60a5fa', 'bg-blue-500/20'),
+                'Zone 2': ('Zone 2 (Aerobic)',   '#34d399', 'bg-emerald-500/20'),
+                'Zone 3': ('The Grey Zone',      '#64748b', 'bg-slate-500/20'),
+                'Zone 4': ('Zone 4 (Hard)',      '#f97316', 'bg-orange-500/20'),
+                'Zone 5': ('Zone 5 (Max)',       '#ef4444', 'bg-red-500/20'),
             }
-            txt_col, bg_col, border_col = style_map.get(category_raw, ('text-zinc-400', 'bg-zinc-800', 'border-zinc-700'))
-            category_label = category_raw.replace('_', ' ').title()
+            
+            # Map category to style (Fallback to Zinc)
+            label_text, text_hex, bg_class = style_config.get(
+                category_raw, 
+                (category_raw.replace('_', ' ').title(), '#a1a1aa', 'bg-zinc-800')
+            )
 
             async def pick_run(h, dlg):
                 dlg.close()
@@ -7271,7 +7511,7 @@ TRAINING ZONES:
                 with ui.row().classes('w-full items-center justify-between p-4 border-b border-zinc-800 bg-zinc-900/50'):
                     with ui.column().classes('gap-2'):
                         ui.label('Inspect Runs').classes('text-xs font-bold text-zinc-500 uppercase tracking-wider')
-                        ui.label(f'[ {category_label} ]').classes(f'text-sm font-bold px-3 py-1 rounded-md border {txt_col} {bg_col} {border_col}')
+                        ui.label(label_text).classes(f'text-sm font-bold px-3 py-1 rounded {bg_class}').style(f'color: {text_hex};')
                 
                 # Scrollable List
                 with ui.element('div').classes('w-full max-h-[350px] overflow-y-auto'):
