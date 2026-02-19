@@ -1,5 +1,5 @@
 @echo off
-echo 🪟 Building Garmin Analyzer Pro (NiceGUI)...
+echo 🪟 Building Ultra State (NiceGUI)...
 
 REM 1. Get NiceGUI path dynamically
 for /f "delims=" %%i in ('python -c "import nicegui; import os; print(os.path.dirname(nicegui.__file__))"') do set NICEGUI_PATH=%%i
@@ -12,7 +12,7 @@ if exist dist rmdir /s /q dist
 REM 3. Build the Exe
 echo 🔨 Running PyInstaller...
 pyinstaller --noconfirm --onefile --windowed --clean ^
-    --name "GarminAnalyzerPro" ^
+    --name "UltraState" ^
     --icon="runner.ico" ^
     --add-data "%NICEGUI_PATH%;nicegui" ^
     --hidden-import="nicegui" ^
@@ -27,6 +27,6 @@ pyinstaller --noconfirm --onefile --windowed --clean ^
 
 echo.
 echo ✅ Build Complete!
-echo 📂 Executable: dist\GarminAnalyzerPro.exe
+echo 📂 Executable: dist\UltraState.exe
 echo.
 pause

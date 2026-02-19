@@ -1,4 +1,4 @@
-# 🛠️ Build Instructions for Garmin Analyzer Pro
+# 🛠️ Build Instructions for Ultra State
 
 These instructions will help you package the NiceGUI-based application into standalone executables.
 
@@ -37,7 +37,7 @@ rm -rf build dist
 
 # Build the app
 pyinstaller --noconfirm --onefile --windowed --clean \
-    --name "GarminAnalyzerPro" \
+    --name "UltraState" \
     --icon="runner.icns" \
     --add-data "$NICEGUI_PATH:nicegui" \
     --hidden-import="nicegui" \
@@ -51,10 +51,10 @@ pyinstaller --noconfirm --onefile --windowed --clean \
 
 ### Create DMG Installer (Optional)
 ```bash
-hdiutil create dist/GarminAnalyzerPro.dmg -volname "Garmin Analyzer Pro" -srcfolder dist/GarminAnalyzerPro.app -ov
+hdiutil create dist/UltraState.dmg -volname "Ultra State" -srcfolder dist/UltraState.app -ov
 ```
 
-**Output:** `dist/GarminAnalyzerPro` or `dist/GarminAnalyzerPro.app`
+**Output:** `dist/UltraState` or `dist/UltraState.app`
 
 ---
 
@@ -76,7 +76,7 @@ if exist dist rmdir /s /q dist
 
 REM Build the exe
 pyinstaller --noconfirm --onefile --windowed --clean ^
-    --name "GarminAnalyzerPro" ^
+    --name "UltraState" ^
     --icon="runner.ico" ^
     --add-data "%NICEGUI_PATH%;nicegui" ^
     --hidden-import="nicegui" ^
@@ -88,7 +88,7 @@ pyinstaller --noconfirm --onefile --windowed --clean ^
     app.py
 ```
 
-**Output:** `dist\GarminAnalyzerPro.exe`
+**Output:** `dist\UltraState.exe`
 
 ---
 

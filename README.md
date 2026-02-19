@@ -1,6 +1,6 @@
-# Garmin Analyzer Pro 🏃‍♂️💨
+# Ultra State 🏃‍♂️💨
 
-Garmin Analyzer Pro is a modern web-based desktop application for runners who want to unlock the advanced training metrics that Garmin Connect hides. Built with a sleek dark-mode interface, it transforms your .FIT files into actionable insights about aerobic efficiency, cardiac drift, and running form—all optimized for analysis by your LLM of choice (ChatGPT, Claude, Gemini, whatever).
+Ultra State is a modern web-based desktop application for runners who want to unlock the advanced training metrics that Garmin Connect hides. Built with a sleek dark-mode interface, it transforms your .FIT files into actionable insights about aerobic efficiency, cardiac drift, and running form—all optimized for analysis by your LLM of choice (ChatGPT, Claude, Gemini, whatever).
 
 This project is built for serious runners who want deeper insights into efficiency and durability. It's not garbage data - if you feed this into your homerolled LLM running coach, it will help you adjust your form (cadence), avoid or heal from injuries, and maximize a weekly training plan based on your own body's ever-changing capabilities (ex. x12 hill sprints on Tue, rest Wed to lock in gains, 10 mile pace run Fri, etc.). Like our training, this tool is a work in progress so contributions, suggestions, and positive vibes will help us all.
 
@@ -35,7 +35,7 @@ This project is built for serious runners who want deeper insights into efficien
 - 💾 **CSV Export** - Export filtered data for Excel/Sheets analysis
 - 📸 **Chart Export** - Export all trend charts as a single combined PNG image
 - 🔄 **Cross-Platform** - Works on Windows and macOS
-- 📦 **Standalone Executables** - If you're not a developer, don't sweat it, executables are available in [releases](https://github.com/themeaningofmeaning/garmin-fit-analyzer/releases)
+- 📦 **Standalone Executables** - If you're not a developer, don't sweat it, executables are available in [releases](https://github.com/themeaningofmeaning/ultra-state/releases)
 
 ## 📸 Screenshots
 
@@ -69,9 +69,9 @@ The trend chart uses a smart 4-color system to categorize the **Quality** of eve
 
 Don't want to mess with Python code? No problem.
 
-1. **[Click here to go to the Releases page](https://github.com/themeaningofmeaning/garmin-fit-analyzer/releases).**
-2. 🍎**Mac Users:** Download `GarminAnalyzerPro.dmg` or `GarminAnalyzerPro-macOS.zip`.
-3. 🪟**Windows Users:** Download `GarminAnalyzerPro-Windows.zip`, unzip it, and run the executable.
+1. **[Click here to go to the Releases page](https://github.com/themeaningofmeaning/ultra-state/releases).**
+2. 🍎**Mac Users:** Download `UltraState.dmg` or `UltraState-macOS.zip`.
+3. 🪟**Windows Users:** Download `UltraState-Windows.zip`, unzip it, and run the executable.
 
 ### Option 2: Run from Source (For Developers)
 
@@ -79,8 +79,8 @@ If you want to modify the code or contribute:
 
 ```bash
 # Clone the repository
-git clone https://github.com/themeaningofmeaning/garmin-fit-analyzer.git
-cd garmin-fit-analyzer
+git clone https://github.com/themeaningofmeaning/ultra-state.git
+cd ultra-state
 
 # Create virtual environment (recommended)
 python -m venv venv
@@ -103,13 +103,13 @@ Want to create standalone executables? We've got you covered.
 ### For macOS
 ```bash
 ./build_mac.sh
-# Output: dist/GarminAnalyzerPro.app
+# Output: dist/UltraState.app
 ```
 
 ### For Windows
 ```cmd
 build_windows.bat
-# Output: dist\GarminAnalyzerPro.exe
+# Output: dist\UltraState.exe
 ```
 
 See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for detailed build documentation and troubleshooting.
@@ -177,7 +177,7 @@ For the most powerful insights, combine these three data sources. This allows th
 
 **2. This App's Report (Scope: This Run Only)**
 * **File:** Clipboard Text
-* **Source:** **Garmin Analyzer App** $\rightarrow$ "Copy for LLM".
+* **Source:** **Ultra State** $\rightarrow$ "Copy for LLM".
 * **Why:** Provides the deep-dive mechanics (Decoupling, Form Efficiency) that Garmin Connect hides.
 
 **3. The Splits (Scope: This Run Only)**
@@ -196,7 +196,7 @@ For the most powerful insights, combine these three data sources. This allows th
 ## 📂 Project Structure
 
 ```
-garmin-analyzer-pro/
+ultra-state/
 ├── app.py            # Main application
 ├── analyzer.py       # Core FIT file analysis logic
 ├── assets/           # Screenshots and images

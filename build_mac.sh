@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-echo "🍎 Building Garmin Analyzer Pro (NiceGUI)..."
+echo "🍎 Building Ultra State (NiceGUI)..."
 
 # 1. Get NiceGUI path dynamically
 NICEGUI_PATH=$(python3 -c "import nicegui; import os; print(os.path.dirname(nicegui.__file__))")
@@ -13,7 +13,7 @@ rm -rf build dist
 # 3. Build the App
 echo "🔨 Running PyInstaller..."
 pyinstaller --noconfirm --onefile --windowed --clean \
-    --name "GarminAnalyzerPro" \
+    --name "UltraState" \
     --icon="runner.icns" \
     --add-data "$NICEGUI_PATH:nicegui" \
     --hidden-import="nicegui" \
@@ -28,7 +28,7 @@ pyinstaller --noconfirm --onefile --windowed --clean \
 
 echo ""
 echo "✅ Build Complete!"
-echo "📂 Executable: dist/GarminAnalyzerPro"
+echo "📂 Executable: dist/UltraState"
 echo ""
 echo "To create a DMG installer, run:"
-echo "  hdiutil create dist/GarminAnalyzerPro.dmg -volname 'Garmin Analyzer Pro' -srcfolder dist/GarminAnalyzerPro.app -ov"
+echo "  hdiutil create dist/UltraState.dmg -volname 'Ultra State' -srcfolder dist/UltraState.app -ov"

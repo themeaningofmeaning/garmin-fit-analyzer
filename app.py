@@ -52,7 +52,7 @@ MAP_PAYLOAD_VERSION = 5
 
 
 # --- MAIN APPLICATION CLASS ---
-class GarminAnalyzerApp:
+class UltraStateApp:
     """Main application class for the Garmin FIT Analyzer."""
     
     def __init__(self):
@@ -3075,9 +3075,9 @@ class GarminAnalyzerApp:
     def build_sidebar(self):
         """Create fixed left sidebar with controls."""
         with ui.column().classes('w-56 bg-zinc-900 p-4 h-screen sticky top-0 flex-shrink-0'):
-            # Logo/Title
-            ui.label('🏃‍♂️ Garmin\nAnalyzer Pro').classes(
-                'text-2xl font-bold text-center mb-4 whitespace-pre-line text-white'
+            # BRAND: Desktop Logo
+            ui.label('🏃‍♂️ Ultra State').classes(
+                'text-2xl font-black tracking-tight text-white mb-8'
             )
             
             # Timeframe filter
@@ -6460,23 +6460,7 @@ Activity Breakdown: {activity_breakdown}
         
         self.volume_card_container.clear()
         with self.volume_card_container:
-            # Generate chart based on current lens
-            if self.volume_lens == 'mix':
-                fig = self.generate_training_mix_chart()
-                verdict, v_color, v_bg = self.calculate_mix_verdict(self.df)
-                subtitle = 'Weekly distribution by run type'
-            elif self.volume_lens == 'load':
-                fig = self.generate_load_chart()
-                verdict, v_color, v_bg = self.calculate_load_verdict(self.df)
-                subtitle = 'Weekly distribution by training stress'
-            elif self.volume_lens == 'zones':
-                fig = self.generate_hr_zones_chart()
-                verdict, v_color, v_bg = self.calculate_hr_zones_verdict(self.df)
-                subtitle = 'Weekly time in each heart rate zone'
-            else:
-                fig = self.generate_weekly_volume_chart()
-                verdict, v_color, v_bg = self.calculate_volume_verdict(self.df)
-                subtitle = 'Breakdown in quality of miles (click any section to inspect runs)'
+            fig, verdict, v_color, v_bg, subtitle = self.get_active_volume_lens_state()
             
             # Update verdict badge
             if hasattr(self, 'volume_verdict_label'):
@@ -6498,6 +6482,66 @@ Activity Breakdown: {activity_breakdown}
                 self.volume_chart.on('plotly_click', self.handle_bar_click)
             else:
                 ui.label('No data available for this view').classes('text-zinc-500 text-center py-8')
+
+    def get_active_volume_lens_state(self):
+        """Return chart + metadata for the currently selected Training Volume lens."""
+        if self.volume_lens == 'mix':
+            fig = self.generate_training_mix_chart()
+            verdict, v_color, v_bg = self.calculate_mix_verdict(self.df)
+            subtitle = 'Weekly distribution by run type'
+        elif self.volume_lens == 'load':
+            fig = self.generate_load_chart()
+            verdict, v_color, v_bg = self.calculate_load_verdict(self.df)
+            subtitle = 'Weekly distribution by training stress'
+        elif self.volume_lens == 'zones':
+            fig = self.generate_hr_zones_chart()
+            verdict, v_color, v_bg = self.calculate_hr_zones_verdict(self.df)
+            subtitle = 'Weekly time in each heart rate zone'
+        else:
+            fig = self.generate_weekly_volume_chart()
+            verdict, v_color, v_bg = self.calculate_volume_verdict(self.df)
+            subtitle = 'Breakdown in quality of miles (click any section to inspect runs)'
+
+        return fig, verdict, v_color, v_bg, subtitle
+
+    def get_volume_lens_label(self):
+        """Return UI label for the active Training Volume lens."""
+        lens_labels = {
+            'quality': 'Quality',
+            'zones': 'HR Zones',
+            'load': 'Load',
+            'mix': 'Training Mix',
+        }
+        return lens_labels.get(self.volume_lens, 'Quality')
+
+    def apply_export_chart_header(self, fig, title, subtitle, verdict=None, badge_color=None, margin=None):
+        """Apply static export header with optional inline-styled verdict badge."""
+        if margin is None:
+            margin = dict(t=185, l=60, r=20, b=60)
+
+        verdict_text = str(verdict).strip() if verdict is not None else ''
+        
+        if verdict_text and verdict_text.upper() != 'N/A':
+            formatted_title = f"{title}  [ {verdict_text.upper()} ]"
+        else:
+            formatted_title = title
+
+        fig.update_layout(
+            title=dict(
+                text=f'<b>{formatted_title}</b><br><span style="font-size:14px; color:#a1a1aa;">{subtitle}</span>',
+                font=dict(size=24, color='white'),
+                x=0.02,
+                xanchor='left',
+                y=0.96,
+                yanchor='top'
+            ),
+            margin=margin
+        )
+
+        existing_annotations = list(fig.layout.annotations) if fig.layout.annotations else []
+        annotations = [a for a in existing_annotations if getattr(a, 'name', None) != 'export_verdict_badge']
+        if len(annotations) != len(existing_annotations):
+            fig.update_layout(annotations=annotations)
     
     def generate_efficiency_decoupling_chart(self):
         """Generate Running Efficiency vs. Aerobic Decoupling chart with QUADRANT LOGIC."""
@@ -7373,36 +7417,20 @@ Activity Breakdown: {activity_breakdown}
                         badge_color = 'grey'
                 
                 # 1. Weekly Volume Composition Card (with Lens Switcher)
-                # Generate initial chart based on current lens
-                if self.volume_lens == 'mix':
-                    volume_fig = self.generate_training_mix_chart()
-                    vol_verdict, vol_color, vol_bg = self.calculate_mix_verdict(self.df)
-                    vol_subtitle = 'Weekly distribution by run type'
-                elif self.volume_lens == 'load':
-                    volume_fig = self.generate_load_chart()
-                    vol_verdict, vol_color, vol_bg = self.calculate_load_verdict(self.df)
-                    vol_subtitle = 'Weekly distribution by training stress'
-                elif self.volume_lens == 'zones':
-                    volume_fig = self.generate_hr_zones_chart()
-                    vol_verdict, vol_color, vol_bg = self.calculate_hr_zones_verdict(self.df)
-                    vol_subtitle = 'Weekly time in each heart rate zone'
-                else:
-                    volume_fig = self.generate_weekly_volume_chart()
-                    vol_verdict, vol_color, vol_bg = self.calculate_volume_verdict(self.df)
-                    vol_subtitle = 'Breakdown in quality of miles (click any section to inspect runs)'
+                volume_fig, vol_verdict, vol_color, vol_bg, vol_subtitle = self.get_active_volume_lens_state()
                 
                 if volume_fig:
                     with ui.card().classes('w-full bg-zinc-900 border border-zinc-800 p-6 mb-8').style('border-radius: 12px; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);'):
                         
                         # Header Row: Title + ❓ Icon + Verdict Badge (INLINE)
-                        with ui.row().classes('w-full items-center gap-3 mb-1'):
+                        with ui.row().classes('w-full items-center gap-2 mb-1'):
                             ui.label('Training Volume').classes('text-xl font-bold text-white')
                             
                             # Verdict Badge
                             self.volume_verdict_label = ui.label(f'{vol_verdict}').classes(f'text-sm font-bold px-3 py-1 rounded {vol_bg}').style(f'color: {vol_color};')
                             
                             # Info Icon (inline)
-                            ui.icon('help_outline').classes('text-zinc-500 hover:text-white transition-colors duration-200 cursor-pointer text-xl ml-auto').on(
+                            ui.icon('help_outline').classes('text-zinc-500 hover:text-white cursor-pointer text-lg transition-colors').on(
                                 'click', lambda: self.show_volume_info(
                                     highlight_verdict=self.volume_verdict_label.text if hasattr(self, 'volume_verdict_label') else None
                                 )
@@ -7984,8 +8012,8 @@ TIME IN ZONES (zone1_mins ... zone5_mins):
                 ui.notify('No chart data to save', type='warning')
                 return
             
-            # Generate the three charts with titles
-            volume_fig = self.generate_weekly_volume_chart()
+            # Generate the three charts with titles (use active Training Volume lens + verdict context)
+            volume_fig, volume_verdict, volume_verdict_color, _, volume_subtitle = self.get_active_volume_lens_state()
             efficiency_fig = self.generate_efficiency_decoupling_chart()
             cadence_fig = self.generate_cadence_trend_chart()
             
@@ -7999,41 +8027,36 @@ TIME IN ZONES (zone1_mins ... zone5_mins):
             efficiency_fig.data[1].fillcolor = 'rgba(180, 50, 50, 0.15)'  # Darker, more muted red
             efficiency_fig.data[1].line.color = 'rgba(180, 50, 50, 0.4)'
             
-            # Add titles to each chart for export (left-aligned, larger text, better positioning)
-            volume_fig.update_layout(
-                title=dict(
-                    text='<b>Training Volume</b><br><span style="font-size:14px; color:#a1a1aa;">Breakdown of quality miles vs. garbage miles</span>',
-                    font=dict(size=24, color='white'),
-                    x=0.02,
-                    xanchor='left',
-                    y=0.96,
-                    yanchor='top'
-                ),
-                margin=dict(t=160, l=60, r=20, b=60)
+            # Resolve verdict badges for all three charts in export header
+            efficiency_verdict, efficiency_verdict_color, _ = self.calculate_efficiency_verdict(self.df)
+            cadence_verdict, cadence_verdict_color, _ = self.calculate_cadence_verdict(self.df)
+
+            # Add titles + inline-styled badges to each chart for export
+            self.apply_export_chart_header(
+                fig=volume_fig,
+                title=f'Training Volume | {self.get_volume_lens_label()}',
+                subtitle=volume_subtitle,
+                verdict=volume_verdict,
+                badge_color=volume_verdict_color,
+                margin=dict(t=185, l=60, r=20, b=60),
             )
             
-            efficiency_fig.update_layout(
-                title=dict(
-                    text='<b>Aerobic Efficiency</b><br><span style="font-size:14px; color:#a1a1aa;">Running efficiency vs. cardiovascular drift over time</span>',
-                    font=dict(size=24, color='white'),
-                    x=0.02,
-                    xanchor='left',
-                    y=0.96,
-                    yanchor='top'
-                ),
-                margin=dict(t=160, l=60, r=60, b=60)
+            self.apply_export_chart_header(
+                fig=efficiency_fig,
+                title='Aerobic Efficiency',
+                subtitle='Running efficiency vs. cardiovascular drift over time',
+                verdict=efficiency_verdict,
+                badge_color=efficiency_verdict_color,
+                margin=dict(t=185, l=60, r=60, b=60),
             )
             
-            cadence_fig.update_layout(
-                title=dict(
-                    text='<b>Running Mechanics</b><br><span style="font-size:14px; color:#a1a1aa;">Cadence trend showing turnover consistency</span>',
-                    font=dict(size=24, color='white'),
-                    x=0.02,
-                    xanchor='left',
-                    y=0.96,
-                    yanchor='top'
-                ),
-                margin=dict(t=160, l=60, r=20, b=60)
+            self.apply_export_chart_header(
+                fig=cadence_fig,
+                title='Running Mechanics',
+                subtitle='Cadence trend showing turnover consistency',
+                verdict=cadence_verdict,
+                badge_color=cadence_verdict_color,
+                margin=dict(t=185, l=60, r=20, b=60),
             )
             
             # Convert to images using Plotly's built-in export (run in thread to avoid blocking)
@@ -8747,14 +8770,14 @@ def main():
     nicegui_logger.addFilter(MuteFrameworkNoise())
 
     # Instantiate the application
-    GarminAnalyzerApp()
+    UltraStateApp()
     
     # Run in native mode with specified window configuration
     try:
         ui.run(
             native=True,
             window_size=(1200, 900),
-            title="Garmin Analyzer Pro",
+            title="Ultra State",
             reload=False,
             dark=True  # Force dark mode for native window
         )

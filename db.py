@@ -5,7 +5,7 @@ import pandas as pd
 import hashlib
 
 class DatabaseManager:
-    def __init__(self, db_path='runner_stats.db'):
+    def __init__(self, db_path='ultra_state.db'):
         self.db_path = db_path
         self.create_tables()
 
