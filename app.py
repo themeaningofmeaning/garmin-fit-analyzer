@@ -2661,6 +2661,26 @@ class GarminAnalyzerApp:
         /* 1. THE APPLE-STYLE HOVER FIX (DARK MODE)       */
         /**************************************************/
 
+        /* Aurora Gradient Button Force Override */
+        .ai-gradient-btn {
+            background: linear-gradient(135deg, #059669 0%, #34D399 100%) !important;
+            box-shadow: 0 0 12px rgba(52, 211, 153, 0.4) !important;
+            border: none !important;
+            color: white !important;
+        }
+
+        /* Productive Ember Tab Indicator */
+        .ember-tabs .q-tab__indicator {
+            background: linear-gradient(to right, #EA580C, #F97316) !important;
+            box-shadow: 0 0 10px rgba(234, 88, 12, 0.5) !important;
+            height: 3px !important;
+            border-radius: 2px 2px 0 0;
+        }
+        .ai-gradient-btn:hover {
+            filter: brightness(1.1);
+            transform: scale(1.02);
+        }
+
         /* Hide Plotly Modebar */
         .modebar {
             display: none !important;
@@ -3077,11 +3097,18 @@ class GarminAnalyzerApp:
                 ).classes('w-full bg-zinc-800 text-white hover:bg-zinc-700').props('flat disable')
 
                 # Copy for AI: primary output action.
-                self.copy_btn = ui.button('COPY FOR AI', on_click=self.copy_to_llm, icon='auto_awesome').classes(
-                    'w-full text-white font-bold tracking-wide transform transition-transform duration-300 hover:scale-[1.01]'
-                ).props('disable').style(
-                    'background: linear-gradient(to right, #10b981, #14b8a6); box-shadow: 0 0 12px rgba(16, 185, 129, 0.35); border: none;'
-                )
+                # FORCE FIX: Using plain HTML button to bypass Quasar styles entirely
+                self.copy_btn = ui.element('button').classes(
+                    'ai-gradient-btn w-full text-white font-bold tracking-wide '
+                    'transform transition-transform duration-300 hover:scale-[1.01] '
+                    'flex items-center justify-center gap-2 py-2 px-4 rounded shadow-lg'
+                ).style(
+                    'cursor: pointer; opacity: 0.5; pointer-events: none;' # Start disabled
+                ).on('click.stop', self.copy_to_llm)
+                
+                with self.copy_btn:
+                    ui.icon('auto_awesome').classes('text-white')
+                    self.copy_btn_label = ui.label('COPY FOR AI').classes('text-white font-bold')
 
             # Visual separator below output actions
             ui.separator().classes('my-3 bg-zinc-800')
@@ -3690,7 +3717,8 @@ root.destroy()
                 # Create tabs row with absolute positioned Save Chart button
                 with ui.row().classes('w-full items-center mb-0 relative pb-3'):
                     # Tabs centered, taking full width
-                    with ui.tabs(on_change=lambda e: self.toggle_save_chart_button(e.value)).classes('w-full justify-center').props('active-color="white" indicator-color="orange" align="center" content-class="text-zinc-500"') as tabs:
+                # Tabs: Navigation for main content
+                    with ui.tabs(on_change=lambda e: self.toggle_save_chart_button(e.value)).classes('ember-tabs w-full justify-center').props('active-color="white" align="center" content-class="text-zinc-500"') as tabs:
                         trends_tab = ui.tab('Trends')
                         report_tab = ui.tab('FEED')
                         activities_tab = ui.tab('ACTIVITIES')
@@ -3990,10 +4018,10 @@ root.destroy()
         has_data = bool(self.activities_data)
         if has_data:
             self.export_btn.props(remove='disable')
-            self.copy_btn.props(remove='disable')
+            self.copy_btn.style('opacity: 1; pointer-events: auto; cursor: pointer;')
         else:
             self.export_btn.props(add='disable')
-            self.copy_btn.props(add='disable')
+            self.copy_btn.style('opacity: 0.5; pointer-events: none;')
 
         # Background map payload migration for older activities (non-blocking)
         if self.activities_data:
@@ -4048,13 +4076,13 @@ root.destroy()
         
         # LLM Safety Lock: Disable copy button for large datasets
         if self.current_timeframe in ["All Time", "This Year"]:
-            self.copy_btn.props(add='disable')
-            self.copy_btn.text = 'Too much data for LLM'
+            self.copy_btn.style('opacity: 0.5; pointer-events: none;')
+            self.copy_btn_label.text = 'Too much data for LLM'
         else:
             # Only enable if we have data
             if self.activities_data:
-                self.copy_btn.props(remove='disable')
-            self.copy_btn.text = 'Copy for LLM'
+                self.copy_btn.style('opacity: 1; pointer-events: auto; cursor: pointer;')
+            self.copy_btn_label.text = 'COPY FOR AI'
     
     @staticmethod
     def hex_to_rgb(hex_color):
