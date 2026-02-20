@@ -118,7 +118,7 @@ See [BUILD_INSTRUCTIONS.md](BUILD_INSTRUCTIONS.md) for detailed build documentat
 
 | Metric | Description | Good Range | Why It Matters |
 |--------|-------------|------------|----------------|
-| **Training Load** | Recovery: <75<br>Maintenance: 75-150<br>Productive: 150-300<br>Overreaching: 300+ | Measures total workout stress - helps balance hard training with recovery |
+| **Training Load** | Recovery: <75<br>Base: 75-150<br>Productive: 150-300<br>Overreaching: 300+ | Measures total workout stress - helps balance hard training with recovery |
 | **Efficiency Factor (EF)** | Speed ÷ Heart Rate | Higher = Better | Your "gas mileage" - tracks aerobic engine development |
 | **Aerobic Decoupling (Cost)** | HR drift over time | < 5% = Excellent | Measures cardiovascular durability and fatigue resistance |
 | **HR Recovery (HRR)** | HR drop in 60 seconds | > 30 bpm = Excellent | Indicates aerobic fitness and recovery capacity |
@@ -130,11 +130,11 @@ Training Load measures workout stress by analyzing components like duration and 
 
 **Load Categories:**
 - **🔵 Recovery (<75):** Easy effort that promotes adaptation and recovery
-- **🟢 Maintenance (75-150):** Steady training that maintains your current fitness level
+- **🟢 Base (75-150):** Steady training that maintains your current fitness level
 - **🟠 Productive (150-300):** Hard work that builds fitness and improves performance
 - **🔴 Overreaching (300+):** Very high stress that requires adequate recovery time
 
-**Training Tip:** Most of your runs should be Recovery or Maintenance, with Productive efforts 1-2x per week, and Overreaching reserved for key workouts or races.
+**Training Tip:** Most of your runs should be Recovery or Base, with Productive efforts 1-2x per week, and Overreaching reserved for key workouts or races.
 
 ### 💡 Understanding Aerobic Decoupling
 

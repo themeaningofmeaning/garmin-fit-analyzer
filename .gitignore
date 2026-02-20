@@ -129,6 +129,7 @@ TASK_*.md
 *_REPORT.md
 *_SUMMARY.txt
 runner_stats.db
+ultra_state.db
 *.html
 .build-readme.txt
 

@@ -2671,10 +2671,10 @@ class UltraStateApp:
             color: white !important;
         }
 
-        /* Productive Ember Tab Indicator */
+        /* Primary Tab Indicator */
         .ember-tabs .q-tab__indicator {
-            background: linear-gradient(to right, #EA580C, #F97316) !important;
-            box-shadow: 0 0 10px rgba(234, 88, 12, 0.5) !important;
+            background: linear-gradient(135deg, #059669 0%, #34D399 100%) !important;
+            box-shadow: 0 0 10px rgba(52, 211, 153, 0.5) !important;
             height: 3px !important;
             border-radius: 2px 2px 0 0;
         }
@@ -2814,14 +2814,14 @@ class UltraStateApp:
             /* Base Dynamic Properties driven by python-injected variables */
             background: radial-gradient(circle at top right, var(--strain-bg), transparent 70%), #1b1b1b !important;
             border: 1px solid var(--strain-border) !important;
-            box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.05), 0 4px 20px var(--strain-shadow) !important;
+            box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.05), 0 2px 12px var(--strain-shadow) !important;
             border-radius: 12px !important;
             transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease !important;
         }
         .glass-card:hover {
             transform: translateY(-2px) !important;
             /* Intensify glow to 20% and brighter top edge */
-            box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.1), 0 8px 30px var(--strain-shadow-hover) !important;
+            box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.1), 0 4px 16px var(--strain-shadow-hover) !important;
             border-color: var(--strain-border-hover) !important;
         }
 
@@ -2836,7 +2836,7 @@ class UltraStateApp:
             transform: translateY(-4px) !important;
             /* Expanded Glow Shadow using injected RGB variable */
             /* We use !important to override the base glass-card hover shadow if needed, or blend them */
-            box-shadow: 0 12px 40px rgba(var(--theme-color-rgb), 0.3) !important;
+            box-shadow: 0 6px 20px rgba(var(--theme-color-rgb), 0.3) !important;
             /* Brightened Border */
             border-color: rgba(255, 255, 255, 0.3) !important;
         }
@@ -3057,6 +3057,27 @@ class UltraStateApp:
         .q-field__native, .q-field__input, .q-field__append .q-icon { color: white !important; }
         .q-field--outlined .q-field__control:before { border-color: rgba(255, 255, 255, 0.3) !important; }
         .q-field--outlined .q-field__control:hover:before { border-color: rgba(255, 255, 255, 0.6) !important; }
+
+        /**************************************************/
+        /* 7. FOCUS TOKEN BLOOM ANIMATION                 */
+        /**************************************************/
+        @keyframes bloom-pulse {
+            0% {
+                box-shadow: 0 0 12px rgba(255, 255, 255, 0.05);
+                border-color: rgba(63, 63, 70, 0.8); /* zinc-700 */
+            }
+            40% {
+                box-shadow: 0 0 25px rgba(255, 255, 255, 0.3);
+                border-color: rgba(161, 161, 170, 0.8); /* zinc-400 */
+            }
+            100% {
+                box-shadow: 0 0 0px rgba(0, 0, 0, 0);
+                border-color: rgba(63, 63, 70, 1.0); /* zinc-700 */
+            }
+        }
+        .animate-bloom {
+            animation: bloom-pulse 600ms ease-out 1 forwards;
+        }
         </style>
         ''')
         
@@ -3088,6 +3109,22 @@ class UltraStateApp:
                 value='Last 30 Days',
                 on_change=self.on_filter_change
             ).classes('w-full mb-4 bg-zinc-900').style('color: white;').props('outlined dense dark behavior="menu"')
+            self.pre_focus_timeframe = 'Last 30 Days'
+
+            # Focus Mode Exit Token (Hidden by default)
+            # Monochrome Apple Pro Token
+            self.focus_token = ui.button(
+                color=None,
+                on_click=self.exit_focus_mode
+            ).props('flat no-caps no-ripple').classes(
+                'w-full mb-4 rounded flex items-center justify-between px-3 py-1.5 '
+                'border border-zinc-700 bg-zinc-800 hover:bg-zinc-700 '
+                'transition-all duration-200 hidden group'
+            )
+            with self.focus_token:
+                self.focus_token_label = ui.label('🎯 Focus (0)').classes('text-white font-bold tracking-wide')
+                ui.icon('clear').classes('text-zinc-400 group-hover:text-white transition-colors duration-200 text-lg')
+
 
             ui.label('ACTIONS').classes('text-[10px] text-zinc-500 font-semibold tracking-[0.10em] mt-1 mb-1')
             with ui.column().classes('w-full gap-2'):
@@ -3783,8 +3820,8 @@ root.destroy()
         # Floating Action Bar (Lives at root level to float above everything)
         self.fab_container = ui.row().classes(
             'fixed bottom-8 left-1/2 transform -translate-x-1/2 ' # Centered at bottom
-            'bg-zinc-800/90 backdrop-blur-md text-white px-6 py-2 rounded-full '
-            'shadow-2xl border border-zinc-700 z-50 items-center gap-4 '
+            'bg-zinc-900/90 backdrop-blur-lg text-white px-6 py-2 rounded-full '
+            'shadow-2xl border border-zinc-800 border-t-white/10 z-50 items-center gap-4 '
             'transition-all duration-300 translate-y-[150%] opacity-0 pointer-events-none'
         )
     
@@ -3839,19 +3876,21 @@ root.destroy()
         )
         
         with self.fab_container:
-            # COUNT BADGE — Emerald tint
+            # COUNT BADGE — Neutral/Sleek aesthetic
             with ui.element('div').classes(
-                'flex items-center justify-center rounded-full px-3 py-0.5 mr-1'
-            ).style('background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3);'):
-                ui.label(f"{count}").classes('font-bold text-base text-emerald-400')
+                'flex items-center justify-center rounded-full px-3 py-0.5 mr-1 bg-zinc-800'
+            ).style('border: 1px solid rgba(255, 255, 255, 0.1);'):
+                ui.label(f"{count}").classes('font-bold text-base text-white')
             ui.label('Selected').classes('text-sm text-zinc-400 mr-3 font-medium')
             
-            # FOCUS BUTTON — Emerald accent, unified with brand
-            ui.button('Focus', icon='center_focus_strong', color=None,
-                      on_click=lambda: self.enter_focus_mode(selected_rows)
-            ).props('flat dense no-caps').classes(
-                'text-emerald-400 hover:text-emerald-300 font-semibold text-sm'
-            )
+            # FOCUS BUTTON — Crisp White Accent
+            with ui.element('button').classes(
+                'flex items-center justify-center gap-1.5 px-3 py-1 cursor-pointer rounded-md '
+                'font-bold text-sm transition-transform duration-300 hover:scale-[1.05] '
+                'text-white drop-shadow-[0_0_8px_rgba(255,255,255,0.4)] hover:drop-shadow-[0_0_12px_rgba(255,255,255,0.8)]'
+            ).on('click.stop', lambda: self.enter_focus_mode(selected_rows)):
+                ui.icon('center_focus_strong').classes('text-lg')
+                ui.label('Focus').classes('tracking-wide')
             
             # SEPARATOR
             ui.element('div').classes('w-px h-5 mx-1').style('background: rgba(255,255,255,0.1);')
@@ -3907,21 +3946,18 @@ root.destroy()
         
         # 4. Update State
         self.focus_mode_active = True
-        focus_label = f"🎯 Focus ({len(hashes)})"
-        self.current_timeframe = focus_label
+        self.current_timeframe = 'Focus'
         
-        # 5. Inject Focus Mode into the dropdown and style it
-        # Guard flag prevents on_filter_change from immediately undoing our work
-        self._entering_focus_mode = True
-        current_options = list(self.timeframe_select.options)
-        if focus_label not in current_options:
-            current_options.append(focus_label)
-            self.timeframe_select.options = current_options
-        self.timeframe_select.value = focus_label
-        self._entering_focus_mode = False
-        # Add a neon glow to the dropdown so user knows they're in a special state
-        self.timeframe_select.style(add='border: 1px solid #34d399; box-shadow: 0 0 12px rgba(16, 185, 129, 0.4); border-radius: 8px;')
+        # 5. Swap out the UI
+        # Save previous timeframe so we can restore it on exit
+        if not str(self.timeframe_select.value).startswith('🎯'):
+            self.pre_focus_timeframe = self.timeframe_select.value
+            
+        self.timeframe_select.classes(add='hidden')
+        self.focus_token_label.set_text(f"🎯 Focus ({len(hashes)})")
         
+        # Unhide the token and trigger the bloom animation
+        self.focus_token.classes(remove='hidden', add='animate-bloom')
         # 6. Refresh All Views (Feed, Charts, and Table)
         self.update_trends_chart()
         self.update_report_text()
@@ -3932,19 +3968,20 @@ root.destroy()
         ui.notify("Focus Mode — select a timeframe to exit", type='info', icon='center_focus_strong')
 
     async def exit_focus_mode(self):
-        """Exit Focus Mode — restore original timeframe and reload data."""
+        """Exit Focus Mode — restore original timeframe UI and reload data."""
         self.focus_mode_active = False
         
-        # Remove the Focus option from dropdown and restore styling
+        # Swap out the UI and clear the animation so it can trigger next time
+        self.focus_token.classes(add='hidden', remove='animate-bloom')
+        self.timeframe_select.classes(remove='hidden')
+        
+        # Guard flag prevents on_filter_change from immediately looping
         self._entering_focus_mode = True
-        current_options = [o for o in self.timeframe_select.options if not str(o).startswith('🎯')]
-        self.timeframe_select.options = current_options
-        self.timeframe_select.value = 'Last 30 Days'
+        self.timeframe_select.value = self.pre_focus_timeframe
         self._entering_focus_mode = False
-        self.timeframe_select.style(remove='border: 1px solid #34d399; box-shadow: 0 0 12px rgba(16, 185, 129, 0.4); border-radius: 8px;')
         
         # Update timeframe and reload data
-        self.current_timeframe = 'Last 30 Days'
+        self.current_timeframe = self.pre_focus_timeframe
         await self.refresh_data_view()
         ui.notify("Exited Focus Mode", type='info', icon='zoom_out')
 
@@ -4094,18 +4131,11 @@ root.destroy()
         if self._entering_focus_mode:
             return
         
-        # If we're in focus mode and user picks a DIFFERENT timeframe, exit focus mode
+        # If we're in focus mode and user picks a DIFFERENT timeframe via some other UI flow, exit focus mode
         if self.focus_mode_active and not str(e.value).startswith('🎯'):
             self.focus_mode_active = False
-            # Remove the Focus option from dropdown and restore styling
-            self._entering_focus_mode = True
-            new_options = [o for o in self.timeframe_select.options if not str(o).startswith('🎯')]
-            self.timeframe_select.options = new_options
-            self._entering_focus_mode = False
-            self.timeframe_select.style(remove='border: 1px solid #34d399; box-shadow: 0 0 12px rgba(16, 185, 129, 0.4); border-radius: 8px;')
-        elif self.focus_mode_active and str(e.value).startswith('🎯'):
-            # User re-selected the focus option itself, no-op
-            return
+            self.focus_token.classes(add='hidden')
+            self.timeframe_select.classes(remove='hidden')
         
         # Update current timeframe state from the dropdown value
         self.current_timeframe = e.value
@@ -4186,7 +4216,7 @@ root.destroy()
                 if strain < 75:
                     strain_label, strain_color, strain_text_color = "Recovery", "#60a5fa", "#60a5fa" # Blue
                 elif strain < 150:
-                    strain_label, strain_color, strain_text_color = "Maintenance", "#10B981", "#10B981" # Green
+                    strain_label, strain_color, strain_text_color = "Base", "#10B981", "#10B981" # Green
                 elif strain < 300:
                     strain_label, strain_color, strain_text_color = "Productive", "#f97316", "#f97316" # Orange
                 else:
@@ -4981,29 +5011,29 @@ Lower is better (<5% is solid). Your heart is working harder to maintain the sam
             
             # Scale with color coding
             ui.label('Load Categories:').classes('text-sm font-bold mb-2')
-            with ui.column().classes('gap-2 mb-4'):
-                with ui.row().classes('items-center gap-2'):
-                    ui.label('🔵').classes('text-lg')
-                    ui.label('Recovery (<75): Easy effort that promotes adaptation and recovery.').classes('text-sm text-blue-400')
+            with ui.column().classes('gap-3 mb-4'):
+                with ui.row().classes('items-start no-wrap gap-2'):
+                    ui.label('🔵').classes('text-lg leading-none mt-0.5')
+                    ui.html('<b>Recovery (<75):</b> Easy effort that promotes adaptation and recovery.').classes('text-sm text-blue-400 leading-snug')
                 
-                with ui.row().classes('items-center gap-2'):
-                    ui.label('🟢').classes('text-lg')
-                    ui.label('Maintenance (75-150): Steady training that maintains your current fitness level.').classes('text-sm text-green-400')
+                with ui.row().classes('items-start no-wrap gap-2'):
+                    ui.label('🟢').classes('text-lg leading-none mt-0.5')
+                    ui.html('<b>Base (75-150):</b> Builds and strengthens your aerobic foundation and endurance capacity. This is the goal state for 80% of your volume. It is highly constructive.').classes('text-sm text-green-400 leading-snug')
                 
-                with ui.row().classes('items-center gap-2'):
-                    ui.label('🟠').classes('text-lg')
-                    ui.label('Productive (150-300): Hard work that builds fitness and improves performance.').classes('text-sm')
+                with ui.row().classes('items-start no-wrap gap-2'):
+                    ui.label('🟠').classes('text-lg leading-none mt-0.5')
+                    ui.html('<b>Productive (150-300):</b> Hard work that builds fitness and improves performance.').classes('text-sm text-orange-400 leading-snug')
                 
-                with ui.row().classes('items-center gap-2'):
-                    ui.label('🔴').classes('text-lg')
-                    ui.label('Overreaching (300+): Very high stress that requires adequate recovery time.').classes('text-sm text-red-400')
+                with ui.row().classes('items-start no-wrap gap-2'):
+                    ui.label('🔴').classes('text-lg leading-none mt-0.5')
+                    ui.html('<b>Overreaching (300+):</b> Very high stress that requires adequate recovery time.').classes('text-sm text-red-400 leading-snug')
             
             ui.markdown('''
 **How to Use It:**  
 Track your weekly load to balance hard training with recovery. Consistent productive loads build fitness, while too many overreaching sessions can lead to burnout.
 
 **Training Tip:**  
-Most of your runs should be Recovery or Maintenance, with Productive efforts 1-2x per week, and Overreaching reserved for key workouts or races.
+Most of your runs should be Recovery or Base, with Productive efforts 1-2x per week, and Overreaching reserved for key workouts or races.
             ''').classes('text-sm text-gray-300 mb-4')
             
             # Close button
@@ -6052,7 +6082,7 @@ Activity Breakdown: {activity_breakdown}
             
             strain = self._calculate_strain(activity)
             if strain < 75: load_cat = 'Recovery'
-            elif strain < 150: load_cat = 'Maintenance'
+            elif strain < 150: load_cat = 'Base'
             elif strain < 300: load_cat = 'Productive'
             else: load_cat = 'Overreaching'
             
@@ -6067,16 +6097,16 @@ Activity Breakdown: {activity_breakdown}
         df_load = pd.DataFrame(load_data)
         
         # Colors match feed card Load colors for consistency
-        categories = ['Recovery', 'Maintenance', 'Productive', 'Overreaching']
+        categories = ['Recovery', 'Base', 'Productive', 'Overreaching']
         colors = {
             'Recovery':     '#60a5fa',  # Blue — matches feed card
-            'Maintenance':  '#10B981',  # Green — matches feed card
+            'Base':         '#10B981',  # Green — matches feed card
             'Productive':   '#f97316',  # Orange — matches feed card
             'Overreaching': '#ef4444',  # Red — matches feed card
         }
         descriptions = {
             'Recovery':     'Low stress, promotes adaptation',
-            'Maintenance':  'Steady load, maintains fitness',
+            'Base':         'Steady load, maintains fitness',
             'Productive':   'Hard effort, builds fitness',
             'Overreaching': 'Very high stress, needs recovery',
         }
@@ -6194,7 +6224,7 @@ Activity Breakdown: {activity_breakdown}
     def calculate_load_verdict(self, df=None, start_index=None, end_index=None):
         """Calculate load verdict from visible stacked-bar mileage (distance-weighted)."""
         try:
-            categories = ['Recovery', 'Maintenance', 'Productive', 'Overreaching']
+            categories = ['Recovery', 'Base', 'Productive', 'Overreaching']
             data = self._slice_lens_weekly_data(self.weekly_load_data, start_index, end_index)
             if data is None or data.empty:
                 return 'N/A', '#71717a', 'bg-zinc-700'
@@ -6208,27 +6238,27 @@ Activity Breakdown: {activity_breakdown}
                 return 'N/A', '#71717a', 'bg-zinc-700'
 
             recovery = data['Recovery'].sum()
-            maintenance = data['Maintenance'].sum()
+            base_load = data['Base'].sum()
             productive = data['Productive'].sum()
             overreaching = data['Overreaching'].sum()
 
             recovery_pct = (recovery / total_miles) * 100
-            maintenance_pct = (maintenance / total_miles) * 100
+            base_pct = (base_load / total_miles) * 100
             productive_pct = (productive / total_miles) * 100
             overreach_pct = (overreaching / total_miles) * 100
-            easy_pct = recovery_pct + maintenance_pct
+            easy_pct = recovery_pct + base_pct
 
             if (
                 overreach_pct >= 20
                 and overreach_pct >= productive_pct
-                and overreach_pct >= maintenance_pct
+                and overreach_pct >= base_pct
                 and overreach_pct >= recovery_pct
             ):
                 return 'OVERREACHING', '#ef4444', 'bg-red-500/20'
 
             if (
                 productive_pct >= 20
-                and productive_pct >= maintenance_pct
+                and productive_pct >= base_pct
                 and productive_pct >= recovery_pct
                 and productive_pct >= overreach_pct
             ):
@@ -6237,7 +6267,7 @@ Activity Breakdown: {activity_breakdown}
             if easy_pct >= 85 and productive_pct < 8 and overreach_pct < 5:
                 return 'UNDERTRAINED', '#3b82f6', 'bg-blue-500/20'
 
-            return 'MAINTAINING', '#10b981', 'bg-emerald-500/20'
+            return 'BASE', '#10b981', 'bg-emerald-500/20'
 
         except:
             return 'N/A', '#71717a', 'bg-zinc-700'
@@ -7944,7 +7974,7 @@ TRAINING ZONES:
 TRAINING LOAD (load_score):
 - TRIMP-style internal load score (duration x HR intensity)
 - < 75: Recovery / Easy
-- 75-150: Maintenance / Aerobic
+- 75-150: Base / Aerobic
 - 150-300: Productive / Hard
 - > 300: Overreaching / Extreme
 
@@ -8166,9 +8196,9 @@ TIME IN ZONES (zone1_mins ... zone5_mins):
                 'Tempo':    ('Tempo Miles',    '#f43f5e', 'bg-rose-500/20'),
                 
                 # Load Lens
-                'Maintenance':  ('Maintenance',    '#10B981', 'bg-emerald-500/20'),
-                'Productive':   ('Productive',     '#f97316', 'bg-orange-500/20'),
-                'Overreaching': ('Overreaching',   '#ef4444', 'bg-red-500/20'),
+                'Base':         ('Base',         '#10B981', 'bg-emerald-500/20'),
+                'Productive':   ('Productive',   '#f97316', 'bg-orange-500/20'),
+                'Overreaching': ('Overreaching', '#ef4444', 'bg-red-500/20'),
                 # 'Recovery' is shared with Mix but needs consistent styling
                 
                 # HR Zones Lens
@@ -8550,7 +8580,7 @@ HEART RATE RECOVERY (HRR):
 TRAINING LOAD:
 - Quantifies total physiological stress (duration x HR intensity)
 - <75: Recovery / Easy
-- 75-150: Maintenance / Aerobic
+- 75-150: Base / Aerobic
 - 150-300: Productive / Hard
 - >300: Overreaching / Extreme
 
