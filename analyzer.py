@@ -13,6 +13,12 @@ import os
 import math
 
 from hr_zones import HR_ZONE_ORDER, classify_hr_zone, hr_color_for_value, normalize_max_hr
+from constants import (
+    SUPPORTED_SPORTS,
+    FORM_VERDICT,
+    SPLIT_BUCKET,
+    TE_LABEL,
+)
 
 
 MAP_PAYLOAD_VERSION = 5
@@ -25,64 +31,73 @@ def get_best_value(record, legacy_key, enhanced_key):
 def analyze_form(cadence, gct=None, stride=None, bounce=None):
     """
     Analyze running form and return verdict, color, icon, and prescription.
+    Verdict keys and copy are defined in constants.FORM_VERDICT.
     """
     # Default Result
     res = {
-        'verdict': 'ANALYZING',
-        'color': 'text-zinc-500',
-        'bg': 'border-zinc-700',
-        'icon': 'help_outline',
+        'verdict':      'ANALYZING',
+        'color':        'text-zinc-500',
+        'bg':           'border-zinc-700',
+        'icon':         'help_outline',
         'prescription': 'Not enough data.'
     }
-    
+
     # 1. Safely cast and validate inputs
     try:
         cadence = float(cadence or 0)
-        gct = float(gct or 0)
-        stride = float(stride or 0)
-        bounce = float(bounce or 0)
+        gct     = float(gct     or 0)
+        stride  = float(stride  or 0)
+        bounce  = float(bounce  or 0)
     except (ValueError, TypeError):
         return res
-    
+
     if cadence == 0:
         return res
 
     # 2. Normalize Units (Target: mm for both)
     if stride < 10: stride_mm = stride * 1000
-    else: stride_mm = stride
+    else:           stride_mm = stride
 
-    if bounce < 1: bounce_mm = bounce * 1000
+    if bounce < 1:   bounce_mm = bounce * 1000
     elif bounce < 20: bounce_mm = bounce * 10
-    else: bounce_mm = bounce
+    else:             bounce_mm = bounce
 
-    # --- DIAGNOSIS TREE ---
+    # --- DIAGNOSIS TREE (thresholds per constants.FORM_VERDICT docstring) ---
+    def _apply(key):
+        v = FORM_VERDICT[key]
+        res.update({'verdict': v['label'], 'color': v['color'],
+                    'bg': v['bg'], 'icon': v['icon'],
+                    'prescription': v['prescription']})
+
     if cadence >= 170:
-        res.update({'verdict': 'ELITE FORM', 'color': 'text-emerald-400', 'bg': 'border-emerald-500/30', 'icon': 'verified', 'prescription': 'Pro-level mechanics. Excellent turnover.'})
+        _apply('ELITE_FORM')
     elif cadence >= 160:
-        res.update({'verdict': 'GOOD FORM', 'color': 'text-blue-400', 'bg': 'border-blue-500/30', 'icon': 'check_circle', 'prescription': 'Balanced mechanics. Solid turnover.'})
+        _apply('GOOD_FORM')
     elif cadence < 135:
-        res.update({'verdict': 'HIKING / REST', 'color': 'text-blue-400', 'bg': 'border-blue-500/30', 'icon': 'hiking', 'prescription': 'Power hiking or recovery interval.'})
+        _apply('HIKING_REST')
     elif cadence < 155:
-        res.update({'verdict': 'HEAVY FEET', 'color': 'text-orange-400', 'bg': 'border-orange-500/30', 'icon': 'warning', 'prescription': 'Cadence is low. Focus on quick turnover.'})
+        _apply('HEAVY_FEET')
     else:
-        res.update({'verdict': 'PLODDING', 'color': 'text-yellow-400', 'bg': 'border-yellow-500/30', 'icon': 'do_not_step', 'prescription': 'Turnover is sluggish. Pick up your feet.'})
-    
+        _apply('PLODDING')
+
     return res
 
 def classify_split(cadence, hr, max_hr, grade):
     """
-    Classify a single split (mile/lap) into 3 Buckets.
+    Classify a single split (mile/lap) into 3 quality buckets.
+    Returns one of: SPLIT_BUCKET.HIGH_QUALITY, SPLIT_BUCKET.STRUCTURAL, SPLIT_BUCKET.BROKEN.
+    See constants.SPLIT_BUCKET for full definitions.
     """
     cadence = cadence or 0
-    hr = hr or 0
-    max_hr = max_hr or 185
-    grade = grade or 0
+    hr      = hr      or 0
+    max_hr  = max_hr  or 185
+    grade   = grade   or 0
     z2_limit = max_hr * 0.78
-    
-    if grade > 8 or cadence < 140: return 'STRUCTURAL'
-    if hr > 0 and hr <= z2_limit: return 'STRUCTURAL'
-    if cadence >= 160: return 'HIGH QUALITY'
-    else: return 'BROKEN'
+
+    if grade > 8 or cadence < 140:           return SPLIT_BUCKET.STRUCTURAL
+    if hr > 0 and hr <= z2_limit:            return SPLIT_BUCKET.STRUCTURAL
+    if cadence >= 160:                       return SPLIT_BUCKET.HIGH_QUALITY
+    return SPLIT_BUCKET.BROKEN
 
 def minetti_cost_of_running(grade):
     grade = np.clip(grade, -0.45, 0.45)
@@ -127,6 +142,33 @@ def _get_speed_color(speed_mps, min_speed, max_speed):
     g = int(c1[1] + (c2[1] - c1[1]) * ratio)
     b = int(c1[2] + (c2[2] - c1[2]) * ratio)
         
+    return f'#{r:02x}{g:02x}{b:02x}'
+
+
+def gradient_color_from_t(t: float) -> str:
+    """
+    Map a pre-normalized position t (0.0 = slowest, 1.0 = fastest) to the
+    canonical Garmin 5-color gradient (Blue → Green → Yellow → Orange → Red).
+
+    This is the single authoritative implementation of the gradient.  Use this
+    instead of the (now-deleted) UltraStateApp._multi_color_from_t().
+    """
+    t = max(0.0, min(1.0, float(t)))
+    colors = [
+        (0, 0, 255),    # Blue
+        (0, 255, 0),    # Green
+        (255, 255, 0),  # Yellow
+        (255, 165, 0),  # Orange
+        (255, 0, 0),    # Red
+    ]
+    idx = int(t * 4)
+    if idx >= 4:
+        idx = 3
+    ratio = (t * 4) - idx
+    c1, c2 = colors[idx], colors[idx + 1]
+    r = int(c1[0] + (c2[0] - c1[0]) * ratio)
+    g = int(c1[1] + (c2[1] - c1[1]) * ratio)
+    b = int(c1[2] + (c2[2] - c1[2]) * ratio)
     return f'#{r:02x}{g:02x}{b:02x}'
 
 
@@ -468,36 +510,37 @@ class FitAnalyzer:
     def get_training_label(self, aerobic, anaerobic):
         """
         Selective Adaptation Filter.
-        Returns custom (Label, Color_Class) based on Training Effect.
-        COACHING LOGIC: Filters out 'accidental' anaerobic noise.
+        Returns (label_string, color_class) based on Training Effect.
+        Returns (None, None) for base/recovery runs — intentionally no label.
+        Label strings and colors are defined in constants.TE_LABEL.
         """
-        # Ensure inputs are floats (Handle None/Missing data safely)
         try:
-            aer = float(aerobic or 0)
+            aer = float(aerobic  or 0)
             ana = float(anaerobic or 0)
         except (ValueError, TypeError):
             return None, None
 
-        # 1. MAX POWER (The Purple Zone)
-        # 3.5+ is undeniable sprint work.
+        # 1. MAX POWER — 3.5+ is undeniable sprint work.
         if ana >= 3.5:
-            return "🚀 MAX POWER", "text-purple-400"
+            v = TE_LABEL['MAX_POWER']
+            return v['label'], v['color']
 
-        # 2. ANAEROBIC CAPACITY (The Orange Zone)
-        # The Threshold: 2.5 (Catches your Flat Sprints).
-        # The Filter: Must be within 1.0 of Aerobic score (Ignores Long Runs with hills).
+        # 2. ANAEROBIC CAPACITY — threshold 2.5, must be within 1.0 of aerobic.
         if ana >= 2.5 and ana > (aer - 1.0):
-            return "🔋 ANAEROBIC", "text-orange-400"
-            
-        # 3. VO2 MAX (The Red Zone)
+            v = TE_LABEL['ANAEROBIC']
+            return v['label'], v['color']
+
+        # 3. VO2 MAX
         if aer >= 4.2:
-            return "🫀 VO2 MAX", "text-red-400"
+            v = TE_LABEL['VO2_MAX']
+            return v['label'], v['color']
 
-        # 4. THRESHOLD (The Emerald Zone)
+        # 4. THRESHOLD
         if aer >= 3.5:
-            return "📈 THRESHOLD", "text-emerald-400"
+            v = TE_LABEL['THRESHOLD']
+            return v['label'], v['color']
 
-        # 5. BASE (Clean UI)
+        # 5. BASE — no label (clean UI, no noise on easy runs)
         return None, None
     
     def analyze_file(self, filename: str) -> Optional[Dict[str, Any]]:
@@ -538,9 +581,24 @@ class FitAnalyzer:
         session_sport = None
         for msg in fitfile.get_messages("session"):
             vals = msg.get_values()
-            
+
             if 'sport' in vals:
                 session_sport = vals.get('sport')
+
+        # --- ARCHITECTURE GUARD ---
+        # Ultra State exclusively processes running and trail running activities.
+        # All other sports (cycling, swimming, strength, etc.) must be rejected here
+        # to prevent metric contamination — e.g. ground contact time and vertical
+        # oscillation are meaningless outside of running gait.
+        # See ARCHITECTURE.md > Data Ingestion Rules.
+        # SUPPORTED_SPORTS is defined in constants.py.
+        if session_sport and session_sport not in SUPPORTED_SPORTS:
+            self._emit(f"⚠️ Skipped (sport='{session_sport}'): {os.path.basename(filename)}")
+            return None  # Gracefully skip — library_manager treats None as a clean skip, not a failure
+
+        # Re-open the session loop now that the guard has passed, to extract full metadata.
+        for msg in fitfile.get_messages("session"):
+            vals = msg.get_values()
             
             # --- TIMEZONE FIX: Capture and Convert Start Time ---
             if vals.get('start_time'):

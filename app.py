@@ -28,6 +28,7 @@ from analyzer import (
     build_map_payload_from_streams,
     classify_split,
     compute_training_load_and_zones,
+    gradient_color_from_t,
 )
 from db import DatabaseManager
 from library_manager import LibraryManager
@@ -40,6 +41,21 @@ from hr_zones import (
     classify_hr_zone,
     classify_hr_zone_by_ratio,
 )
+from constants import (
+    LOAD_CATEGORY,
+    LOAD_CATEGORY_COLORS,
+    LOAD_CATEGORY_DESCRIPTIONS,
+    LOAD_CATEGORY_EMOJI,
+    LOAD_MIX_VERDICT,
+    SPLIT_BUCKET,
+    TE_ICON_MAP,
+    TIMEFRAME_OPTIONS,
+    DEFAULT_TIMEFRAME,
+    MODAL_TITLES,
+    UI_COPY,
+)
+from state import AppState
+from components.activity_modal import ActivityModal
 
 
 class MuteFrameworkNoise(logging.Filter):
@@ -59,19 +75,23 @@ class UltraStateApp:
         """Initialize the application with database and state."""
         self.db = DatabaseManager()
         self.library_manager = LibraryManager(db=self.db)
-        # Load the last session ID from DB on startup so "Last Import" works after restart
-        self.current_session_id = self.db.get_last_session_id()
-        self.current_timeframe = "Last 30 Days"
-        self.current_sort_by = 'date'
-        self.current_sort_desc = True # True = DESC, False = ASC
+
+        # ── Centralized session state (Tier 1) ──────────────────────────
+        # See state.py for field definitions and the observer API.
+        # session_id is loaded from DB so 'Last Import' survives restarts.
+        self.state = AppState()
+        self.state.session_id = self.db.get_last_session_id()
+
+        # ── Data caches (Tier 2 — NOT in AppState yet) ──────────────────
+        # Deferred to Phase 2 Step 3 (component extraction).
         self.activities_data = []
         self.df = None
-        self.import_in_progress = False
-        self.focus_mode_active = False
-        self._entering_focus_mode = False
+
+        # ── Focus-mode save/restore (not observed — simple R/W pair) ────
+        self.pre_focus_timeframe = DEFAULT_TIMEFRAME
+
+        # ── UI widget handles ────────────────────────────────────────────
         self.activities_table = None
-        self.active_filters = set()
-        self.volume_lens = 'quality'  # 'quality', 'mix', 'load'
         self.volume_card_container = None  # for surgical card refresh
 
         # Define taxonomy of filter tags
@@ -82,16 +102,16 @@ class UltraStateApp:
             'Intervals':  {'icon': '⚡', 'color': 'orange'},
             'Hill Sprints': {'icon': '⛰️', 'color': 'emerald'},
             'Hills':      {'icon': '⛰️', 'color': 'emerald'},
-            'Recovery':   {'icon': '🧘', 'color': 'blue'},
-            'Base':       {'icon': '🔷', 'color': 'blue'},
+            'Recovery':   {'icon': LOAD_CATEGORY_EMOJI['Recovery'], 'color': 'blue'},
+            'Base':       {'icon': LOAD_CATEGORY_EMOJI['Base'],     'color': 'blue'},
             'Fartlek':    {'icon': '💨', 'color': 'orange'},
             'Steady':     {'icon': '⚓', 'color': 'cyan'},
-            
-            # PHYSIO TAGS
-            'VO2 MAX':    {'icon': '🫀', 'color': 'fuchsia'},
-            'ANAEROBIC':  {'icon': '🔋', 'color': 'orange'},
-            'THRESHOLD':  {'icon': '📈', 'color': 'emerald'},
-            'MAX POWER':  {'icon': '🚀', 'color': 'purple'},
+
+            # PHYSIO TAGS (keys and icons from constants.TE_ICON_MAP)
+            'VO2 MAX':    {'icon': TE_ICON_MAP['VO2 MAX']['icon'],   'color': TE_ICON_MAP['VO2 MAX']['color']},
+            'ANAEROBIC':  {'icon': TE_ICON_MAP['ANAEROBIC']['icon'], 'color': TE_ICON_MAP['ANAEROBIC']['color']},
+            'THRESHOLD':  {'icon': TE_ICON_MAP['THRESHOLD']['icon'], 'color': TE_ICON_MAP['THRESHOLD']['color']},
+            'MAX POWER':  {'icon': TE_ICON_MAP['MAX POWER']['icon'], 'color': TE_ICON_MAP['MAX POWER']['color']},
             }
 
         # Initialize the volume data container
@@ -101,10 +121,7 @@ class UltraStateApp:
         self.weekly_hr_zones_data = None
         self.volume_week_starts = []  # week index map for volume chart zoom
 
-        # LRU-ish cache for parsed activity detail payloads (avoids reparsing FIT on reopen)
-        self.activity_detail_cache = {}
-        self.activity_detail_cache_size = 24
-        self.activity_detail_cache_version = 3
+        # LRU detail cache is now owned by ActivityModal (moved in Phase 2 Step 3)
 
         # Background backfill task for legacy map payloads
         self._map_backfill_task = None
@@ -131,17 +148,88 @@ class UltraStateApp:
         
         # Build UI
         self.build_ui()
-        
+
+        # ── Reactive subscriptions ───────────────────────────────────────
+        # These replace imperative refresh calls scattered through the code.
+        # The subscriber is called automatically whenever the field is written.
+        #
+        # NOTE: refresh_data_view is async; we wrap it via ui.timer(0, ..., once=True)
+        # so it is scheduled onto the NiceGUI event loop rather than called inline,
+        # which would block synchronously inside the __setattr__ call chain.
+        def _schedule_data_refresh(value):
+            """Schedule an async data refresh on the next event-loop tick.
+
+            Guard: 'Focus' is a synthetic sentinel set by enter_focus_mode(),
+            which manages its own in-memory data slice and fires explicit renders.
+            A DB reload here would overwrite the filtered subset immediately after
+            it was set, restoring all activities.
+            """
+            if value == 'Focus':
+                return   # Focus Mode owns its data pipeline — do not reload from DB
+            ui.timer(0, self.refresh_data_view, once=True)
+
+        self.state.subscribe('timeframe', _schedule_data_refresh)
+        self.state.subscribe('volume_lens', lambda _: self.refresh_volume_card())
+
+        # ── ActivityModal component (Phase 2 Step 3) ─────────────────────
+        # Instantiated after build_ui so all render-helper methods exist as
+        # bound methods when passed into the callbacks dict.
+        self.activity_modal = ActivityModal(
+            db=self.db,
+            state=self.state,
+            callbacks=self._build_modal_callbacks(),
+        )
+
         # Start background library services after event loop starts (script-mode safe).
         ui.timer(0.12, self.start_library_services, once=True)
         # Initial render pass.
         ui.timer(0.1, self.refresh_data_view, once=True)
         ui.timer(0.25, self.refresh_library_widget_status, once=True)
         ui.timer(1.0, self.refresh_library_widget_status)
-        
+
         # Show Save Chart button initially with fade (Trends tab is default)
         ui.timer(0.05, lambda: self.save_chart_btn.style('opacity: 1; pointer-events: auto;'), once=True)
 
+        # Check for updates in the background (Option A: notification only).
+        # Runs 3 seconds after startup so it never competes with initial render.
+        from updater import check_and_notify
+        ui.timer(3.0, check_and_notify, once=True)
+
+    def _build_modal_callbacks(self) -> dict:
+        """
+        Build the callbacks dict injected into ActivityModal.
+
+        All references are captured as bound methods of this UltraStateApp
+        instance. ActivityModal calls them without importing UltraStateApp,
+        keeping the dependency boundary clean.
+
+        Must be called after build_ui() so widget-referencing helpers exist.
+        """
+        return {
+            # ── Data helpers ────────────────────────────────────────────────
+            'locate_fit_cb':       self._locate_fit_file,
+            'map_payload_cb':      self._get_or_backfill_map_payload,
+            'normalize_bounds_cb': self._normalize_bounds,
+            'calc_distance_cb':    self._calculate_distance_from_speed,
+            # ── Compute helpers ─────────────────────────────────────────────
+            'hr_zones_cb':         self.calculate_hr_zones,
+            'gap_laps_cb':         self.calculate_gap_for_laps,
+            'decoupling_cb':       self.calculate_aerobic_decoupling,
+            'run_walk_cb':         self.calculate_run_walk_stats,
+            'terrain_cb':          self.calculate_terrain_stats,
+            # ── Render helpers ──────────────────────────────────────────────
+            'physiology_card_cb':  self.create_physiology_card,
+            'hr_zone_chart_cb':    self.create_hr_zone_chart,
+            'lap_splits_cb':       self.create_lap_splits_table,
+            'decoupling_card_cb':  self.create_decoupling_card,
+            'dynamics_card_cb':    self.create_running_dynamics_card,
+            'strategy_row_cb':     self.create_strategy_row,
+            'terrain_graph_cb':    self._build_terrain_graph,
+            # ── Action helpers ──────────────────────────────────────────────
+            'copy_splits_cb':      self.copy_splits_to_clipboard,
+            # ── Navigation (recursive self-reference via shim) ──────────────
+            'open_modal_cb':       self.open_activity_detail_modal,
+        }
 
     def _locate_fit_file(self, activity):
         """
@@ -252,25 +340,9 @@ class UltraStateApp:
         b = max(0, min(255, int(b)))
         return f'#{r:02x}{g:02x}{b:02x}'
 
-    def _multi_color_from_t(self, t):
-        """Map normalized t (0..1) to Garmin 5-color gradient."""
-        t = max(0.0, min(1.0, float(t)))
-        colors = [
-            (0, 0, 255),    # Blue
-            (0, 255, 0),    # Green
-            (255, 255, 0),  # Yellow
-            (255, 165, 0),  # Orange
-            (255, 0, 0),    # Red
-        ]
-        idx = int(t * 4)
-        if idx >= 4:
-            idx = 3
-        ratio = (t * 4) - idx
-        c1, c2 = colors[idx], colors[idx + 1]
-        r = int(c1[0] + (c2[0] - c1[0]) * ratio)
-        g = int(c1[1] + (c2[1] - c1[1]) * ratio)
-        b = int(c1[2] + (c2[2] - c1[2]) * ratio)
-        return self._rgb_to_hex(r, g, b)
+    # NOTE: _multi_color_from_t() was removed — use gradient_color_from_t(t)
+    # from analyzer.py, which is the single authoritative implementation of
+    # the Garmin 5-color gradient. See ARCHITECTURE.md > Color Gradient.
 
     def _projection_on_dual_tone(self, rgb):
         """Project RGB onto dual-tone Zinc->Emerald ramp and return (t, distance)."""
@@ -324,7 +396,7 @@ class UltraStateApp:
                 converted.append(list(seg))
                 continue
             t, _ = self._projection_on_dual_tone(rgb)
-            converted.append([seg[0], seg[1], seg[2], seg[3], self._multi_color_from_t(t)])
+            converted.append([seg[0], seg[1], seg[2], seg[3], gradient_color_from_t(t)])
         return converted
 
     def _build_map_payload_from_segments(self, route_segments, max_segments=500):
@@ -494,306 +566,11 @@ class UltraStateApp:
     
     async def get_activity_detail(self, activity_hash):
         """
-        Parse FIT file to extract detailed stream data for modal display.
-
-        Args:
-            activity_hash: SHA-256 hash identifying the activity
-
-        Returns:
-            Dictionary containing:
-            - hr_stream: List[int] - heart rate values
-            - elevation_stream: List[float] - elevation values in meters
-            - speed_stream: List[float] - speed values in m/s
-            - lap_data: List[Dict] - lap splits with metrics
-            - max_hr: int - maximum heart rate for zone calculations
-            - activity_metadata: Dict - basic activity info from database
-            - timestamps: List[datetime] - timestamps for each data point
+        Thin shim — extracted to ActivityModal._fetch_detail() in Phase 2 Step 3.
+        Kept for backward compatibility with any direct callers.
         """
-        # 1. Query database for activity metadata
-        activity = self.db.get_activity_by_hash(activity_hash)
-        if not activity:
-            return None
+        return await self.activity_modal._fetch_detail(activity_hash)
 
-        # Ensure versioned map payload exists/normalized for this activity metadata.
-        # This is lightweight and avoids stale legacy bounds in modal rendering.
-        try:
-            self._get_or_backfill_map_payload(activity)
-        except Exception as ex:
-            print(f"Map payload prep warning for {activity_hash}: {ex}")
-
-        # 2. Locate FIT file on disk
-        fit_file_path = self._locate_fit_file(activity)
-        if not fit_file_path:
-            return {'error': 'file_not_found', 'activity': activity}
-
-        file_mtime = os.path.getmtime(fit_file_path) if os.path.exists(fit_file_path) else None
-
-        # 2.5 Fast path: return cached detail payload when source file has not changed
-        cached = self.activity_detail_cache.get(activity_hash)
-        if (
-            cached
-            and cached.get('file_path') == fit_file_path
-            and cached.get('file_mtime') == file_mtime
-            and cached.get('cache_version') == self.activity_detail_cache_version
-        ):
-            payload = copy.deepcopy(cached.get('payload', {}))
-            if payload:
-                payload['activity_metadata'] = activity
-                return payload
-
-        # 3. Parse FIT file using fitparse (run in thread to avoid blocking)
-        try:
-            def parse_fit():
-                import fitparse
-                fitfile = fitparse.FitFile(fit_file_path)
-
-                # 4. Extract stream data
-                hr_stream = []
-                elevation_stream = []
-                speed_stream = []
-                cadence_stream = []
-                distance_stream = []
-                timestamps = []
-                
-                # --- NEW: Advanced Form Streams ---
-                vertical_oscillation = []
-                stance_time = []
-                vertical_ratio = []
-                step_length = [] # aka stride_length
-                
-                # Route streams (used for deterministic map payload regeneration when needed)
-                route_lats = []
-                route_lons = []
-                route_speeds = []
-                route_hrs = []
-                route_timestamps = []
-
-                for record in fitfile.get_messages("record"):
-                    vals = record.get_values()
-                    
-                    # --- UTC TO LOCAL FIX ---
-                    ts = vals.get('timestamp')
-                    if ts:
-                        # Ensure we have the timezone module imported at top of file!
-                        ts = ts.replace(tzinfo=timezone.utc).astimezone()
-                    timestamps.append(ts)
-                    # ------------------------
-
-                    hr_stream.append(vals.get('heart_rate'))
-                    elevation_stream.append(
-                        vals.get('enhanced_altitude') or vals.get('altitude')
-                    )
-                    speed_stream.append(
-                        vals.get('enhanced_speed') or vals.get('speed')
-                    )
-                    cadence_stream.append(vals.get('cadence'))
-                    distance_stream.append(vals.get('distance'))
-                    
-                    # --- NEW: Extract Advanced Metrics ---
-                    # Keep as None if missing (do not coerce to 0)
-                    vertical_oscillation.append(vals.get('vertical_oscillation'))
-                    stance_time.append(vals.get('stance_time') or vals.get('ground_contact_time'))
-                    vertical_ratio.append(vals.get('vertical_ratio'))
-                    step_length.append(vals.get('step_length') or vals.get('stride_length'))
-
-                    # Route extraction with robust semicircle conversion and 0,0 filtering
-                    lat_raw = vals.get('position_lat')
-                    lon_raw = vals.get('position_long')
-                    if lat_raw is not None and lon_raw is not None:
-                        try:
-                            lat_raw = float(lat_raw)
-                            lon_raw = float(lon_raw)
-                            if abs(lat_raw) > 180 or abs(lon_raw) > 180:
-                                point_lat = lat_raw * (180 / 2**31)
-                                point_lon = lon_raw * (180 / 2**31)
-                            else:
-                                point_lat = lat_raw
-                                point_lon = lon_raw
-
-                            if (
-                                -90 <= point_lat <= 90
-                                and -180 <= point_lon <= 180
-                                and not (abs(point_lat) < 1e-6 and abs(point_lon) < 1e-6)
-                            ):
-                                route_lats.append(point_lat)
-                                route_lons.append(point_lon)
-                                route_speeds.append(vals.get('enhanced_speed') or vals.get('speed') or 0)
-                                route_hrs.append(vals.get('heart_rate'))
-                                route_timestamps.append(ts)
-                        except (TypeError, ValueError):
-                            pass
-
-                # 5. Extract lap data
-                lap_data = []
-                for lap_msg in fitfile.get_messages("lap"):
-                    vals = lap_msg.get_values()
-                    if not vals:
-                        continue
-                    
-                    # --- TIMEZONE FIX ---
-                    if vals.get('start_time'):
-                        vals['start_time'] = vals.get('start_time').replace(tzinfo=timezone.utc).astimezone()
-                    
-                    if vals.get('timestamp'):
-                        vals['timestamp'] = vals.get('timestamp').replace(tzinfo=timezone.utc).astimezone()
-                    # --------------------
-
-                    # Calculate speed directly if enhanced_avg_speed is missing
-                    total_distance = vals.get('total_distance')
-                    total_timer_time = vals.get('total_timer_time')
-                    
-                    if total_distance and total_timer_time and total_timer_time > 0:
-                        avg_speed = total_distance / total_timer_time
-                    else:
-                        avg_speed = vals.get('enhanced_avg_speed') or vals.get('avg_speed')
-                    
-                    lap_data.append({
-                        'lap_number': len(lap_data) + 1,
-                        'distance': total_distance,
-                        'avg_speed': avg_speed,
-                        'avg_hr': vals.get('avg_heart_rate'),
-                        'avg_cadence': vals.get('avg_cadence'),
-                        'total_ascent': vals.get('total_ascent'),
-                        'total_descent': vals.get('total_descent'),
-                        'start_time': vals.get('start_time'),
-                        'timestamp': vals.get('timestamp'), # Added for GAP calculation
-                        'total_elapsed_time': vals.get('total_elapsed_time')
-                    })
-                
-                # 6. Extract session-level metrics (physiology, environment, form)
-                session_data = {}
-                for session_msg in fitfile.get_messages("session"):
-                    vals = session_msg.get_values()
-                    session_data = {
-                        # Environment
-                        'total_calories': vals.get('total_calories'),
-                        'avg_temperature': vals.get('avg_temperature'),
-                        # Physiology
-                        'total_training_effect': vals.get('total_training_effect'),
-                        'total_anaerobic_training_effect': vals.get('total_anaerobic_training_effect'),
-                        'avg_respiration_rate': vals.get('avg_respiration_rate'),
-                        # Running Dynamics (Form)
-                        'avg_vertical_oscillation': vals.get('avg_vertical_oscillation'),
-                        'avg_stance_time': vals.get('avg_stance_time'),
-                        'avg_step_length': vals.get('avg_step_length'),
-                    }
-                    break  # Only need first session
-
-                # Fallback: Calculate distance from speed if not available
-                if all(d is None for d in distance_stream):
-                    distance_stream = self._calculate_distance_from_speed(speed_stream, timestamps)
-
-                return {
-                    'hr_stream': hr_stream,
-                    'elevation_stream': elevation_stream,
-                    'speed_stream': speed_stream,
-                    'cadence_stream': cadence_stream,
-                    'distance_stream': distance_stream,
-                    'lap_data': lap_data,
-                    'timestamps': timestamps,
-                    'session_data': session_data,
-                    # --- NEW: Advanced Form Streams ---
-                    'vertical_oscillation': vertical_oscillation,
-                    'stance_time': stance_time,
-                    'vertical_ratio': vertical_ratio,
-                    'step_length': step_length,
-                    # Route streams for map payload regeneration
-                    'route_lats': route_lats,
-                    'route_lons': route_lons,
-                    'route_speeds': route_speeds,
-                    'route_hrs': route_hrs,
-                    'route_timestamps': route_timestamps,
-                }
-
-            # Run parsing in background thread
-            result = await run.io_bound(parse_fit)
-            
-            # Check if parsing failed
-            if result is None or not isinstance(result, dict):
-                return {'error': 'parse_error', 'activity': activity, 'message': 'Failed to parse FIT file'}
-
-            # 6. Get max HR (priority: user profile > session max > observed max)
-            max_hr = activity.get('max_hr')
-            if not max_hr and result.get('hr_stream'):
-                # Use session max as fallback
-                valid_hrs = [hr for hr in result['hr_stream'] if hr is not None]
-                max_hr = max(valid_hrs) if valid_hrs else 185
-                result['max_hr_fallback'] = True
-            else:
-                max_hr = max_hr or 185
-                result['max_hr_fallback'] = False
-
-            result['max_hr'] = max_hr
-
-            current_payload = activity.get('map_payload')
-            current_version = int(
-                activity.get('map_payload_version')
-                or (current_payload.get('v') if isinstance(current_payload, dict) else 1)
-                or 1
-            )
-            current_bounds = self._normalize_bounds(
-                current_payload.get('bounds') if isinstance(current_payload, dict) else None
-            )
-            current_segments = current_payload.get('segments') if isinstance(current_payload, dict) else None
-            needs_payload_refresh = (
-                current_version < MAP_PAYLOAD_VERSION
-                or not current_bounds
-                or not isinstance(current_segments, list)
-                or not current_segments
-            )
-
-            if needs_payload_refresh and len(result.get('route_lats', [])) >= 2:
-                refreshed_payload = build_map_payload_from_streams(
-                    result.get('route_lats'),
-                    result.get('route_lons'),
-                    result.get('route_speeds'),
-                    hr_stream=result.get('route_hrs'),
-                    max_hr=max_hr,
-                    timestamps=result.get('route_timestamps'),
-                    target_segments=700,
-                )
-                if isinstance(refreshed_payload, dict) and refreshed_payload.get('segments'):
-                    activity['map_payload'] = refreshed_payload
-                    activity['map_payload_version'] = refreshed_payload.get('v', MAP_PAYLOAD_VERSION)
-                    activity['route_segments'] = refreshed_payload.get('segments', [])
-                    activity['bounds'] = refreshed_payload.get('bounds', [[0, 0], [0, 0]])
-                    try:
-                        self.db.update_activity_map_payload(
-                            activity_hash,
-                            refreshed_payload,
-                            route_segments=refreshed_payload.get('segments'),
-                            bounds=refreshed_payload.get('bounds'),
-                            map_payload_version=refreshed_payload.get('v', MAP_PAYLOAD_VERSION),
-                        )
-                    except Exception as ex:
-                        print(f"Map payload refresh warning for {activity_hash}: {ex}")
-
-            # Route streams are used only for map payload regeneration; keep cache payload compact.
-            for transient_key in ('route_lats', 'route_lons', 'route_speeds', 'route_hrs', 'route_timestamps'):
-                result.pop(transient_key, None)
-
-            result['activity_metadata'] = activity
-
-            # Save detail payload cache keyed by activity hash + file version
-            self.activity_detail_cache[activity_hash] = {
-                'file_path': fit_file_path,
-                'file_mtime': file_mtime,
-                'cache_version': self.activity_detail_cache_version,
-                'payload': copy.deepcopy(result),
-            }
-            if len(self.activity_detail_cache) > self.activity_detail_cache_size:
-                oldest_key = next(iter(self.activity_detail_cache))
-                if oldest_key != activity_hash:
-                    self.activity_detail_cache.pop(oldest_key, None)
-
-            return result
-
-        except Exception as e:
-            print(f"Error parsing FIT file: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'error': 'parse_error', 'activity': activity, 'message': str(e)}
-    
     def get_training_label(self, aerobic_te, anaerobic_te):
         """
         Determine training type label based on Training Effect values.
@@ -1998,56 +1775,7 @@ class UltraStateApp:
             # Training Effect
             aerobic_te = session_data.get('total_training_effect')
             anaerobic_te = session_data.get('total_anaerobic_training_effect')
-            
-            with ui.column().classes('gap-3 h-full justify-between w-full'):
-                
-                # --- TOP SECTION (Anchored Top) ---
-                with ui.column().classes('gap-3 w-full'):
-                    if aerobic_te is not None or anaerobic_te is not None:
-                        with ui.column().classes('gap-1'):
-                            ui.label('TRAINING EFFECT').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
-                            te_str = f"{aerobic_te:.1f} Aerobic" if aerobic_te else "-- Aerobic"
-                            if anaerobic_te:
-                                te_str += f" / {anaerobic_te:.1f} Anaerobic"
-                            ui.label(te_str).classes('text-sm text-white font-mono')
-                    
-                    # Respiration Rate
-                    resp_rate = session_data.get('avg_respiration_rate')
-                    if resp_rate:
-                        with ui.column().classes('gap-1'):
-                            ui.label('AVG BREATH').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
-                            ui.label(f"{int(resp_rate)} brpm").classes('text-sm text-white font-mono')
-                
-                # --- BOTTOM SECTION (Anchored Bottom) ---
-                hrr_list = activity.get('hrr_list')
-                if hrr_list:
-                    try:
-                        score = hrr_list[0] if isinstance(hrr_list, list) else int(hrr_list)
-                    except:
-                        score = 0
-                    
-                    if score > 0:
-                        # Determine color based on HRR score
-                        if score > 30:
-                            hrr_color = '#10B981'  # Green
-                        elif score >= 20:
-                            hrr_color = '#fbbf24'  # Yellow
-                        else:
-                            hrr_color = '#ff4d4d'  # Red
-                        
-                        with ui.column().classes('gap-0 w-full'):
-                            ui.separator().classes('bg-zinc-800 mb-3')
-                            
-                            with ui.row().classes('items-center gap-2 mb-1'):
-                                ui.label('HR RECOVERY (1-MIN)').classes('text-xs text-zinc-500 uppercase tracking-wider font-semibold')
-                                ui.icon('help_outline').classes('text-zinc-600 hover:text-white text-xs cursor-pointer').on('click', lambda: self.show_hrr_info())
-                            
-                            with ui.row().classes('items-baseline gap-2'):
-                                ui.label(f"{score}").classes('text-3xl font-bold font-mono leading-none').style(f'color: {hrr_color};')
-                                ui.label('bpm').classes('text-xs text-zinc-500 font-bold')
-        
-        return card
-    
+
     def create_running_dynamics_card(self, session_data):
         """
         Create "Pro-Level" mechanics card with strict multi-factor diagnosis.
@@ -2150,6 +1878,7 @@ class UltraStateApp:
         
         return card
     
+
     def create_strategy_row(self, run_walk_stats, terrain_stats):
         """
         Create the Ultra Strategy analysis row with run/walk and terrain cards.
@@ -2293,664 +2022,20 @@ class UltraStateApp:
                                     ui.label('PACE').classes('text-[10px] text-zinc-500 uppercase tracking-wider font-semibold')
                                     ui.label(f"{downhill['avg_pace']}").classes('text-sm text-white font-bold font-mono')
     
+
+
     async def open_activity_detail_modal(self, activity_hash, from_feed=False, navigation_list=None):
         """
-        Open detailed view of an activity.
-        FINAL POLISH: 
-        - Badge moved to Metrics Row.
-        - Splits calculation now includes max_hr for accurate verdict.
-        - Uses 'Feed Style' header for everything.
+        Thin shim — extracted to ActivityModal.open() in Phase 2 Step 3.
+        Kept as a forwarding method so nav closures (prev/next) keep working
+        without circular import issues inside the component.
         """
-        # Show loading dialog
-        with ui.dialog() as loading_dialog:
-            with ui.card().classes('bg-zinc-900 p-6').style('min-width: 300px; box-shadow: none;'):
-                with ui.column().classes('items-center gap-4'):
-                    ui.spinner(size='lg', color='emerald')
-                    ui.label('Loading activity details...').classes('text-lg text-white')
-        loading_dialog.open()
-
-        # Parse FIT file asynchronously
-        detail_data = await self.get_activity_detail(activity_hash)
-        loading_dialog.close()
-
-        if detail_data is None or detail_data.get('error'):
-            ui.notify('Error loading activity', type='negative')
-            return
-
-        # Calculate metrics
-        # 1. HR Zones
-        hr_zones = self.calculate_hr_zones(detail_data['hr_stream'], detail_data['max_hr'])
-        
-        # 2. Lap Splits (Passing max_hr for the verdict logic)
-        enhanced_laps = self.calculate_gap_for_laps(
-            detail_data['lap_data'],
-            detail_data['elevation_stream'],
-            detail_data['timestamps'],
-            detail_data.get('cadence_stream'),
-            max_hr=detail_data.get('max_hr', 185) # <--- CRITICAL FIX FROM PART 2
-        )
-        
-        # 3. Decoupling
-        decoupling = self.calculate_aerobic_decoupling(detail_data['hr_stream'], detail_data['speed_stream'])
-        
-        # 4. Run/Walk
-        run_walk_stats = None
-        if detail_data.get('cadence_stream'):
-            run_walk_stats = self.calculate_run_walk_stats(
-                detail_data['cadence_stream'], detail_data['speed_stream'], detail_data['hr_stream']
-            )
-        
-        # 5. Terrain
-        terrain_stats = self.calculate_terrain_stats(
-            detail_data['elevation_stream'], detail_data['hr_stream'], 
-            detail_data['speed_stream'], detail_data['timestamps']
+        await self.activity_modal.open(
+            activity_hash,
+            from_feed=from_feed,
+            navigation_list=navigation_list,
         )
 
-        activity = detail_data['activity_metadata']
-
-        # --- QUALITY BADGE CALCULATION ---
-        try:
-            # 1. Gather Averages
-            avg_cad = activity.get('avg_cadence', 0)
-            avg_hr = activity.get('avg_hr', 0)
-            
-            # Use the max_hr from the detailed parse if available, else DB
-            max_hr = detail_data.get('max_hr') or activity.get('max_hr', 185)
-            
-            # 2. Calculate Average Grade
-            dist_mi = activity.get('distance_mi', 0)
-            elev_ft = activity.get('elevation_ft', 0)
-            if dist_mi > 0:
-                # Rise (ft) / Run (ft) * 100
-                avg_grade = (elev_ft / (dist_mi * 5280)) * 100
-            else:
-                avg_grade = 0
-            
-            # 3. Use the SAME logic as the Chart (classify_split)
-            # This ensures Z2 runs are correctly labeled "Structural"
-            verdict_text = classify_split(avg_cad, avg_hr, max_hr, avg_grade)
-            
-            # 4. Map Verdict to Badge
-            if verdict_text == 'HIGH QUALITY':
-                v_label = 'High Quality Miles' 
-                v_color = 'text-emerald-400'
-                v_bg = 'bg-emerald-500/20 border-emerald-500/30'
-            elif verdict_text == 'STRUCTURAL':
-                 v_label = 'Structural Miles'
-                 v_color = 'text-blue-400'
-                 v_bg = 'bg-blue-500/20 border-blue-500/30'
-            elif verdict_text == 'BROKEN':
-                v_label = 'Broken Miles'
-                v_color = 'text-red-400'
-                v_bg = 'bg-red-500/20 border-red-500/30'
-            else:
-                v_label = None
-                
-        except Exception as e:
-            print(f"Badge Calc Error: {e}")
-            v_label = None
-        # -------------------------------
-
-        # Create main modal
-        modal_map = None
-        modal_fit_bounds = None
-        modal_map_card = None
-
-        with ui.dialog() as detail_dialog:
-            detail_dialog.props('transition-show=none transition-hide=none')
-            _nav_guard = {'active': True}
-            _nav_idx = -1
-            _has_nav = bool(navigation_list and len(navigation_list) > 1)
-            if _has_nav:
-                try:
-                    _nav_idx = navigation_list.index(activity_hash)
-                except ValueError:
-                    _has_nav = False
-
-            async def _nav_prev():
-                if not _nav_guard['active'] or _nav_idx <= 0:
-                    return
-                _nav_guard['active'] = False
-                detail_dialog.close()
-                await self.open_activity_detail_modal(
-                    navigation_list[_nav_idx - 1],
-                    from_feed=from_feed,
-                    navigation_list=navigation_list
-                )
-
-            async def _nav_next():
-                if not _nav_guard['active'] or not _has_nav or _nav_idx >= len(navigation_list) - 1:
-                    return
-                _nav_guard['active'] = False
-                detail_dialog.close()
-                await self.open_activity_detail_modal(
-                    navigation_list[_nav_idx + 1],
-                    from_feed=from_feed,
-                    navigation_list=navigation_list
-                )
-
-            # Deactivate keyboard when dialog closes normally (X button / backdrop click)
-            _nav_keyboard = None  # Will hold reference to ui.keyboard
-
-            def _on_dialog_close():
-                _nav_guard['active'] = False
-                # Deactivate NiceGUI keyboard handler
-                if _nav_keyboard is not None:
-                    _nav_keyboard.active = False
-                # Remove JS keydown interceptor (bonk prevention)
-                ui.run_javascript('if(window._ultraNavKD){document.removeEventListener("keydown",window._ultraNavKD);window._ultraNavKD=null;}')
-            detail_dialog.on('close', _on_dialog_close)
-
-            with ui.card().classes('w-full max-w-[900px] p-0 bg-zinc-950 h-full border border-zinc-800 relative'):
-                # Header: ◀ prev | position counter | next ▶ | close
-                with ui.row().classes('w-full justify-between items-center p-2 px-3'):
-                    if _has_nav:
-                        with ui.row().classes('items-center gap-1'):
-                            prev_btn = ui.button(
-                                icon='chevron_left', color=None, on_click=_nav_prev
-                            ).props('flat round dense')
-                            prev_btn.style('color: #9ca3af !important;')
-                            if _nav_idx <= 0:
-                                prev_btn.props('disable')
-                                prev_btn.style('opacity: 0.3; color: #9ca3af !important;')
-                            ui.label(f'{_nav_idx + 1} of {len(navigation_list)}').classes(
-                                'text-xs text-zinc-500 font-mono tabular-nums tracking-wider'
-                            )
-                            next_btn = ui.button(
-                                icon='chevron_right', color=None, on_click=_nav_next
-                            ).props('flat round dense')
-                            next_btn.style('color: #9ca3af !important;')
-                            if _nav_idx >= len(navigation_list) - 1:
-                                next_btn.props('disable')
-                                next_btn.style('opacity: 0.3; color: #9ca3af !important;')
-                    else:
-                        ui.element('div')  # Spacer when no navigation
-                    close_btn = ui.button(icon='close', on_click=detail_dialog.close, color=None).props('flat round dense')
-                    close_btn.style('color: #9ca3af !important;')
-
-                # Content container
-                with ui.column().classes('w-full gap-4 px-4 pb-4'):
-
-                    # --- NEW: Cinematic Route Map (Leaflet) ---
-                    # Uses pre-calculated data from "First Principles" Analyzer (TinyDB)
-                    activity_meta = detail_data.get('activity_metadata', {})
-                    map_payload = self._get_or_backfill_map_payload(activity_meta) or {}
-
-                    route_segments = map_payload.get('segments', []) if isinstance(map_payload, dict) else []
-                    final_bounds = self._normalize_bounds(map_payload.get('bounds')) if isinstance(map_payload, dict) else None
-
-                    map_center = None
-                    if isinstance(map_payload, dict):
-                        center_val = map_payload.get('center')
-                        if isinstance(center_val, (list, tuple)) and len(center_val) == 2:
-                            try:
-                                c_lat = float(center_val[0])
-                                c_lon = float(center_val[1])
-                                if -90 <= c_lat <= 90 and -180 <= c_lon <= 180:
-                                    map_center = (c_lat, c_lon)
-                            except Exception:
-                                map_center = None
-
-                    if map_center is None and final_bounds:
-                        map_center = (
-                            (final_bounds[0][0] + final_bounds[1][0]) / 2,
-                            (final_bounds[0][1] + final_bounds[1][1]) / 2,
-                        )
-
-                    if route_segments and map_center:
-                        # Map Container
-                        with ui.card().classes('w-full h-80 bg-zinc-950 p-0 border-none no-shadow overflow-hidden relative group').style('opacity: 0; transition: opacity 0.18s ease;') as map_card:
-                            modal_map_card = map_card
-                            # Initialize Leaflet with NO controls for cinematic look
-                            m = ui.leaflet(center=map_center, zoom=13, options={
-                                'zoomControl': False, 
-                                'attributionControl': False
-                            }).classes('w-full h-full leaflet-seam-fix')
-                            
-                            # Hybrid Tiles (helps hide seam artifacts on some satellite tile rows)
-                            m.tile_layer(
-                                url_template=r'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
-                                options={'maxZoom': 20, 'detectRetina': True}
-                            )
-
-                            # Route color mode state + shared render pipeline
-                            map_color_mode = {'value': 'pace'}
-                            map_route_palette = {
-                                'pace': 'linear-gradient(to right, #0000ff, #00ff00, #ffff00, #ffa500, #ff0000)',
-                                'hr': HR_ZONE_MAP_LEGEND_GRADIENT,
-                            }
-                            map_legend_left = {'pace': 'Slower', 'hr': 'Zone 1'}
-                            map_legend_right = {'pace': 'Faster', 'hr': 'Zone 5'}
-                            route_weight = 4
-
-                            def _segment_color(seg, mode):
-                                try:
-                                    if mode == 'hr' and len(seg) > 5 and isinstance(seg[5], str) and seg[5].startswith('#'):
-                                        return seg[5]
-                                    if len(seg) > 4 and isinstance(seg[4], str) and seg[4].startswith('#'):
-                                        return seg[4]
-                                except Exception:
-                                    pass
-                                return '#10b981'
-
-                            def _render_route(mode='pace'):
-                                if not route_segments:
-                                    return
-                                try:
-                                    m.clear_layers()
-                                except Exception as ex:
-                                    print(f"Map clear layers warning: {ex}")
-
-                                # Re-add base tile layer after clear
-                                m.tile_layer(
-                                    url_template=r'https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}',
-                                    options={'maxZoom': 20, 'detectRetina': True}
-                                )
-
-                                # Group segments by selected color mode to reduce layer count
-                                segments_by_color = {}
-                                for seg in route_segments:
-                                    if not isinstance(seg, (list, tuple)) or len(seg) < 4:
-                                        continue
-                                    color = _segment_color(seg, mode)
-                                    if color not in segments_by_color:
-                                        segments_by_color[color] = []
-                                    segments_by_color[color].append([[seg[0], seg[1]], [seg[2], seg[3]]])
-
-                                for color, latlngs in segments_by_color.items():
-                                    m.generic_layer(
-                                        name='polyline',
-                                        args=[
-                                            latlngs,
-                                            {
-                                                'color': color,
-                                                'weight': route_weight,
-                                                'opacity': 1.0,
-                                                'lineCap': 'round',
-                                                'lineJoin': 'round'
-                                            }
-                                        ]
-                                    )
-
-                            # Initial draw (default pace)
-                            _render_route('pace')
-
-                            # Start / End markers (derived from first and last route segments)
-                            start_point = None
-                            end_point = None
-                            try:
-                                if route_segments and len(route_segments[0]) >= 4:
-                                    start_point = [float(route_segments[0][0]), float(route_segments[0][1])]
-                                if route_segments and len(route_segments[-1]) >= 4:
-                                    end_point = [float(route_segments[-1][2]), float(route_segments[-1][3])]
-                            except Exception:
-                                start_point = None
-                                end_point = None
-
-                            def _valid_latlng(pt):
-                                return (
-                                    isinstance(pt, (list, tuple))
-                                    and len(pt) == 2
-                                    and -90 <= pt[0] <= 90
-                                    and -180 <= pt[1] <= 180
-                                )
-
-                            # Pro start/end markers using Leaflet divIcon with crisp inline SVG
-                            if _valid_latlng(start_point) or _valid_latlng(end_point):
-                                icon_start_svg = """
-<svg width="16" height="16" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
-    <path d="M8 5V19L19 12L8 5Z" />
-</svg>
-""".strip()
-                                icon_end_svg = """
-<svg width="14" height="14" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
-    <rect x="4" y="4" width="16" height="16" rx="2" />
-</svg>
-""".strip()
-
-                                async def _add_pro_markers_once_ready(_map=m, _start=start_point, _end=end_point, _svg_start=icon_start_svg, _svg_end=icon_end_svg):
-                                    try:
-                                        await _map.initialized()
-                                        await asyncio.sleep(0.02)
-                                    except Exception as ex:
-                                        print(f"Pro marker init wait failed: {ex}")
-                                        return
-
-                                    if _valid_latlng(_start):
-                                        try:
-                                            start_js = (
-                                                "L.marker(["
-                                                f"{_start[0]}, {_start[1]}"
-                                                "], {"
-                                                "interactive:false, keyboard:false, zIndexOffset:1000, "
-                                                "icon:L.divIcon({"
-                                                "className:'pro-marker pm-start',"
-                                                f"html:{json.dumps(_svg_start)},"
-                                                "iconSize:[30,30],"
-                                                "iconAnchor:[15,15]"
-                                                "})"
-                                                "})"
-                                            )
-                                            _map.run_map_method(':addLayer', start_js)
-                                        except Exception as ex:
-                                            print(f"Pro start marker add failed: {ex}")
-
-                                    if _valid_latlng(_end):
-                                        try:
-                                            end_js = (
-                                                "L.marker(["
-                                                f"{_end[0]}, {_end[1]}"
-                                                "], {"
-                                                "interactive:false, keyboard:false, zIndexOffset:1000, "
-                                                "icon:L.divIcon({"
-                                                "className:'pro-marker pm-end',"
-                                                f"html:{json.dumps(_svg_end)},"
-                                                "iconSize:[30,30],"
-                                                "iconAnchor:[15,15]"
-                                                "})"
-                                                "})"
-                                            )
-                                            _map.run_map_method(':addLayer', end_js)
-                                        except Exception as ex:
-                                            print(f"Pro end marker add failed: {ex}")
-
-                                asyncio.create_task(_add_pro_markers_once_ready())
-
-                            # Explicit Attribution (Minimalist Text)
-                            with ui.element('div').classes('absolute bottom-1 right-2 z-[9999] pointer-events-none text-[10px] text-zinc-400 font-mono mix-blend-plus-lighter'):
-                                ui.html('&copy; Google 2026')
-
-                            # Custom monochrome map mode slider (PACE <-> HR)
-                            toggle_id = f'map_mode_toggle_{activity_hash}'
-
-                            async def _on_map_mode_checkbox_change(e):
-                                checked = False
-                                try:
-                                    checked = bool(await ui.run_javascript(
-                                        f'Boolean(document.getElementById({json.dumps(toggle_id)})?.checked)'
-                                    ))
-                                except Exception:
-                                    raw = e.args
-                                    if isinstance(raw, dict):
-                                        if isinstance(raw.get('checked'), bool):
-                                            checked = raw.get('checked', False)
-                                        elif isinstance(raw.get('target'), dict):
-                                            checked = bool(raw.get('target', {}).get('checked', False))
-                                        elif 'value' in raw:
-                                            value_str = str(raw.get('value', '')).strip().lower()
-                                            checked = value_str in {'1', 'true', 'on', 'checked', 'hr'}
-                                    elif isinstance(raw, bool):
-                                        checked = raw
-                                _set_map_mode('hr' if checked else 'pace')
-
-                            with ui.element('div').classes('mono-toggle-wrapper'):
-                                ui.element('input').props(
-                                    f'type="checkbox" id="{toggle_id}" class="mono-toggle-checkbox"'
-                                ).on('change', _on_map_mode_checkbox_change)
-
-                                with ui.element('label').props(f'for="{toggle_id}" class="mono-toggle-label"'):
-                                    ui.label('PACE').classes('mono-toggle-text-pace')
-                                    ui.label('HR').classes('mono-toggle-text-hr')
-
-                            # Custom Zoom Controls (Top Left - Dark Glass)
-                            with ui.column().classes('absolute top-2 left-2 z-[9999] gap-2'):
-                                # Zoom In
-                                with ui.button(icon='add').props('round dense flat no-caps ripple=false').classes('map-zoom-btn no-ripple').style('background-color: rgba(9, 9, 11, 0.72) !important; color: #ffffff !important; border: 1px solid rgba(255, 255, 255, 0.14) !important;').on('click', lambda: m.run_map_method("zoomIn")):
-                                    pass
-                                # Zoom Out
-                                with ui.button(icon='remove').props('round dense flat no-caps ripple=false').classes('map-zoom-btn no-ripple').style('background-color: rgba(9, 9, 11, 0.72) !important; color: #ffffff !important; border: 1px solid rgba(255, 255, 255, 0.14) !important;').on('click', lambda: m.run_map_method("zoomOut")):
-                                    pass
-
-                            # Speed Legend (Glassmorphism - Top Right)
-                            with ui.column().classes('absolute top-2 right-2 z-[9999] p-3 rounded-xl bg-black/60 backdrop-blur-md border border-white/10 shadow-lg gap-1'):
-                                # Gradient Bar
-                                legend_bar = ui.element('div').classes('w-32 h-2 rounded-full').style(f"background: {map_route_palette['pace']}")
-                                # Labels
-                                with ui.row().classes('w-full justify-between text-[10px] text-zinc-300 font-medium tracking-wide'):
-                                    legend_left = ui.label(map_legend_left['pace'])
-                                    legend_right = ui.label(map_legend_right['pace'])
-
-                            def _set_map_mode(mode):
-                                if mode not in ('pace', 'hr'):
-                                    mode = 'pace'
-                                if map_color_mode['value'] == mode:
-                                    return
-                                map_color_mode['value'] = mode
-
-                                # Route redraw
-                                _render_route(mode)
-
-                                # Re-add start/end markers (route redraw clears all map layers)
-                                if _valid_latlng(start_point) or _valid_latlng(end_point):
-                                    try:
-                                        asyncio.create_task(_add_pro_markers_once_ready())
-                                    except Exception:
-                                        pass
-
-                                # Legend update
-                                legend_bar.style(f"background: {map_route_palette.get(mode, map_route_palette['pace'])}")
-                                legend_left.set_text(map_legend_left.get(mode, map_legend_left['pace']))
-                                legend_right.set_text(map_legend_right.get(mode, map_legend_right['pace']))
-
-                            if final_bounds:
-                                # defer fit until modal is visible; execute after dialog open lifecycle
-                                modal_map = m
-                                modal_fit_bounds = final_bounds
-
-                    
-                    # -------------------------------------------
-                            
-                    # -------------------------------------------
-
-                    # --- HEADER (Polished Layout) ---
-                    with ui.column().classes('w-full px-4 gap-1'):
-                        # Row 1: Date & Time (Clean Title)
-                        date_str = activity.get('date', '')
-                        try:
-                            from datetime import datetime
-                            dt = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
-                            formatted_date = dt.strftime('%A, %B %-d • %-I:%M %p')
-                        except:
-                            formatted_date = date_str
-                        
-                        ui.label(formatted_date).classes('text-2xl font-bold text-white tracking-tight')
-
-                        # Row 2: Metrics + Badge (The "Story")
-                        with ui.row().classes('items-center gap-3'):
-                            # The Big Numbers
-                            distance = activity.get('distance_mi', 0)
-                            elevation = activity.get('elevation_ft', 0)
-                            pace = activity.get('pace', '--:--')
-                            calories = activity.get('calories', 0)
-                            
-                            metrics_str = f"{distance:.1f} mi • {elevation} ft • {pace} /mi"
-                            if calories:
-                                metrics_str += f" • {calories} cal"
-                            
-                            ui.label(metrics_str).classes('text-zinc-400 font-sans tabular-nums text-sm tracking-wide')
-
-                            # The Badge (Injecting Context)
-                            if v_label:
-                                ui.label(v_label).classes(f'text-[10px] font-bold px-2 py-0.5 rounded border {v_color} {v_bg} tracking-wider')
-
-                    # Structural divider
-                    ui.separator().classes('bg-zinc-800 my-4')
-
-                    # 1. Strategy Row
-                    self.create_strategy_row(run_walk_stats, terrain_stats)
-
-                    # 2. HR Zones Chart
-                    with ui.card().classes('w-full bg-zinc-900 p-4 border border-zinc-800').style('border-radius: 8px; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);'):
-                        if detail_data.get('max_hr_fallback'):
-                            ui.label('⚠️ Zones based on Session Max HR').classes('text-xs text-yellow-500 mb-2')
-                        
-                        # Title
-                        ui.label('TIME IN HEART RATE ZONES').classes('text-lg font-bold text-white mb-2')
-                        
-                        hr_chart = self.create_hr_zone_chart(hr_zones)
-                        ui.plotly(hr_chart).classes('w-full')
-
-                    # 3. Body Response Row
-                    session_data = detail_data.get('session_data', {})
-                    if not session_data.get('avg_cadence'):
-                        session_data['avg_cadence'] = activity.get('avg_cadence', 0)
-                    
-                    has_dynamics = session_data and any([session_data.get('avg_vertical_oscillation'), session_data.get('avg_stance_time')])
-                    
-                    with ui.row().classes('w-full gap-3 items-stretch'):
-                        if has_dynamics:
-                            with ui.column().classes('flex-1 min-w-0'):
-                                self.create_running_dynamics_card(session_data)
-                        with ui.column().classes('flex-1 min-w-0'):
-                            self.create_decoupling_card(decoupling, efficiency_factor=activity.get('efficiency_factor', 0))
-                        if session_data:
-                            with ui.column().classes('flex-1 min-w-0'):
-                                self.create_physiology_card(session_data, activity)
-
-                    # 4. Terrain Context Graph (Metric Toggle)
-                    if detail_data.get('distance_stream') and detail_data.get('elevation_stream'):
-                        with ui.card().classes('w-full bg-zinc-900 p-4 border border-zinc-800').style('border-radius: 8px; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);'):
-                            # Header row: title + pill toggle
-                            with ui.row().classes('w-full justify-between items-center mb-2'):
-                                ui.label('TERRAIN CONTEXT').classes('text-lg font-bold text-white')
-                                terrain_toggle = ui.toggle(
-                                    ['Cadence', 'Heart Rate', 'Pace'],
-                                    value='Cadence'
-                                ).props(
-                                    'dense rounded toggle-color="grey-8" text-color="white" size="sm" no-caps'
-                                ).classes('terrain-metric-toggle').style(
-                                    'background: rgba(44,44,46,0.95);'
-                                    ' border-radius: 20px;'
-                                    ' padding: 3px;'
-                                    ' box-shadow: inset 0 0 0 0.5px rgba(255,255,255,0.12), 0 2px 8px rgba(0,0,0,0.5);'
-                                )
-
-                            # Initial chart render
-                            initial_fig = self._build_terrain_graph(detail_data, metric='Cadence')
-                            terrain_plotly = ui.plotly(initial_fig).classes('w-full')
-
-                            # Dynamic redraw on toggle change
-                            def _on_terrain_metric_change(e, _dd=detail_data, _chart=terrain_plotly):
-                                new_fig = self._build_terrain_graph(_dd, metric=e.value)
-                                _chart.figure = new_fig
-                                _chart.update()
-
-                            terrain_toggle.on_value_change(_on_terrain_metric_change)
-
-                            # Apple-style iOS segmented control CSS
-                            ui.add_head_html('''
-                            <style>
-                            .terrain-metric-toggle {
-                                border-radius: 20px !important;
-                                padding: 3px !important;
-                            }
-                            .terrain-metric-toggle .q-btn {
-                                color: rgba(255,255,255,0.5) !important;
-                                font-size: 11.5px !important;
-                                font-weight: 500 !important;
-                                padding: 3px 13px !important;
-                                min-height: 28px !important;
-                                border-radius: 17px !important;
-                                letter-spacing: 0.01em !important;
-                                transition: color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease !important;
-                            }
-                            .terrain-metric-toggle .q-btn--active {
-                                background: #636366 !important;
-                                color: #ffffff !important;
-                                font-weight: 600 !important;
-                                box-shadow: 0 1px 5px rgba(0,0,0,0.55), 0 0.5px 1.5px rgba(0,0,0,0.35) !important;
-                            }
-                            </style>
-                            ''')
-
-                    # 5. Lap Splits
-                    with ui.card().classes('w-full bg-zinc-900 p-4 border border-zinc-800').style('border-radius: 8px; box-shadow: 0px 4px 12px rgba(0, 0, 0, 0.4);'):
-                        with ui.row().classes('w-full justify-between items-center mb-2'):
-                            ui.label('Lap Splits').classes('text-lg font-bold text-white')
-                            copy_icon = ui.icon('content_copy').classes('cursor-pointer text-zinc-500 hover:text-white transition-colors duration-200 text-sm')
-                            copy_icon.on('click.stop', lambda: self.copy_splits_to_clipboard(enhanced_laps))
-                        self.create_lap_splits_table(enhanced_laps)
-
-
-            # --- KEYBOARD NAVIGATION ---
-            if _has_nav:
-                async def _handle_key(e):
-                    if not _nav_guard['active']:
-                        return
-                    if e.key == 'ArrowLeft':
-                        await _nav_prev()
-                    elif e.key == 'ArrowRight':
-                        await _nav_next()
-
-                _nav_keyboard = ui.keyboard(on_key=_handle_key, active=True)
-
-                # Separate JS listener ONLY to preventDefault (suppress macOS bonk sound)
-                ui.run_javascript('''
-                    if(window._ultraNavKD) document.removeEventListener('keydown', window._ultraNavKD);
-                    window._ultraNavKD = function(e) {
-                        if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-                            e.preventDefault();
-                        }
-                    };
-                    document.addEventListener('keydown', window._ultraNavKD);
-                ''')
-
-        detail_dialog.open()
-
-        if modal_map and modal_fit_bounds:
-            fit_options = {'padding': [26, 26], 'maxZoom': 18, 'animate': False}
-            
-            def _bounds_contains(actual_bounds, target_bounds, tolerance=0.00002):
-                if not actual_bounds or not target_bounds:
-                    return False
-                return (
-                    actual_bounds[0][0] <= (target_bounds[0][0] + tolerance)
-                    and actual_bounds[0][1] <= (target_bounds[0][1] + tolerance)
-                    and actual_bounds[1][0] >= (target_bounds[1][0] - tolerance)
-                    and actual_bounds[1][1] >= (target_bounds[1][1] - tolerance)
-                )
-
-            async def _read_current_map_bounds(_map):
-                try:
-                    bounds_expr = (
-                        "((map) => {"
-                        "const b = map.getBounds();"
-                        "return [[b.getSouthWest().lat, b.getSouthWest().lng], "
-                        "[b.getNorthEast().lat, b.getNorthEast().lng], map.getZoom()];"
-                        "})"
-                    )
-                    raw = await _map.run_map_method(f':{bounds_expr}')
-                    if isinstance(raw, (list, tuple)) and len(raw) >= 2:
-                        return self._normalize_bounds(raw[:2]), (raw[2] if len(raw) >= 3 else None)
-                except Exception as ex:
-                    print(f"Map bounds read warning: {ex}")
-                return None, None
-
-            async def _fit_modal_map_deterministic():
-                try:
-                    await modal_map.initialized()
-                    await asyncio.sleep(0)
-                    modal_map.run_map_method('invalidateSize')
-                    modal_map.run_map_method('fitBounds', modal_fit_bounds, fit_options)
-
-                    await asyncio.sleep(0.08)
-                    current_bounds, _ = await _read_current_map_bounds(modal_map)
-                    if not _bounds_contains(current_bounds, modal_fit_bounds):
-                        modal_map.run_map_method('invalidateSize')
-                        modal_map.run_map_method('fitBounds', modal_fit_bounds, fit_options)
-                        await asyncio.sleep(0.08)
-                        current_bounds, _ = await _read_current_map_bounds(modal_map)
-                        if not _bounds_contains(current_bounds, modal_fit_bounds):
-                            print("Map fitBounds verification warning: bounds still off after retry.")
-                except Exception as ex:
-                    print(f"Map fit lifecycle error: {ex}")
-                finally:
-                    if modal_map_card:
-                        modal_map_card.style('opacity: 1; transition: opacity 0.18s ease;')
-
-            asyncio.create_task(_fit_modal_map_deterministic())
-
- 
     def build_ui(self):
         """Construct the complete UI layout with fixed sidebar."""
         
@@ -3402,12 +2487,11 @@ class UltraStateApp:
             # Timeframe filter
             ui.label('TIMEFRAME').classes('text-xs text-gray-400 font-bold text-center mb-1')
             self.timeframe_select = ui.select(
-                options=['Last Import', 'Last 30 Days', 'Last 90 Days', 
-                         'This Year', 'All Time'],
-                value='Last 30 Days',
+                options=TIMEFRAME_OPTIONS,
+                value=DEFAULT_TIMEFRAME,
                 on_change=self.on_filter_change
             ).classes('w-full mb-4 bg-zinc-900').style('color: white;').props('outlined dense dark behavior="menu"')
-            self.pre_focus_timeframe = 'Last 30 Days'
+            self.pre_focus_timeframe = DEFAULT_TIMEFRAME
 
             # Focus Mode Exit Token (Hidden by default)
             # Monochrome Apple Pro Token
@@ -3567,7 +2651,7 @@ class UltraStateApp:
         """Start library manager loop after NiceGUI app startup."""
         try:
             await self.library_manager.start()
-            self.current_session_id = self.db.get_last_session_id()
+            self.state.session_id = self.db.get_last_session_id()
             self._refresh_runs_count_label()
             await self.refresh_library_widget_status()
         except Exception as e:
@@ -3636,6 +2720,7 @@ class UltraStateApp:
                     or bool(getattr(report, 'errors', None))
                 )
             )
+            # skipped_unsupported is intentional behaviour, not an error.
             has_error = bool(root_error or report_failed)
 
             status_name = 'idle'
@@ -3675,6 +2760,9 @@ class UltraStateApp:
                 elif report.failed > 0 or getattr(report, 'reprocess_failed', 0) > 0:
                     total_failures = report.failed + getattr(report, 'reprocess_failed', 0)
                     summary_text = f'{total_failures} failed'
+                elif getattr(report, 'skipped_unsupported', 0) > 0:
+                    skipped = getattr(report, 'skipped_unsupported', 0)
+                    summary_text = f'Skipped {skipped} unsupported file(s)'
                 elif (
                     getattr(report, 'missing_files', 0) > 0
                     or getattr(report, 'reprocess_missing_source', 0) > 0
@@ -3825,7 +2913,9 @@ class UltraStateApp:
         reprocess_missing = int(getattr(report, 'reprocess_missing_source', 0) or 0)
         missing_files = int(getattr(report, 'missing_files', 0) or 0)
 
-        self.current_session_id = self.db.get_last_session_id()
+        skipped_unsupported = int(getattr(report, 'skipped_unsupported', 0) or 0)
+
+        self.state.session_id = self.db.get_last_session_id()
         self._refresh_runs_count_label()
 
         if imported_new > 0 or reprocessed_upgraded > 0:
@@ -3846,7 +2936,14 @@ class UltraStateApp:
                 fragments.append(f'imported {imported_new} new file(s)')
             if reprocessed_upgraded > 0:
                 fragments.append(f'upgraded {reprocessed_upgraded} older run(s)')
+            if skipped_unsupported > 0:
+                fragments.append(f'skipped {skipped_unsupported} unsupported file(s)')
             ui.notify(f"Sync complete: {'; '.join(fragments)}.", type='positive')
+        elif skipped_unsupported > 0:
+            ui.notify(
+                f'Skipped {skipped_unsupported} file(s) (unsupported activities like cycling or swimming).',
+                type='info',
+            )
         elif missing_files > 0 or reprocess_missing > 0:
             total_missing = missing_files + reprocess_missing
             ui.notify(
@@ -4284,8 +3381,8 @@ root.destroy()
              self.df = None
         
         # 4. Update State
-        self.focus_mode_active = True
-        self.current_timeframe = 'Focus'
+        self.state.focus_mode_active = True
+        self.state.timeframe = 'Focus'
         
         # 5. Swap out the UI
         # Save previous timeframe so we can restore it on exit
@@ -4308,19 +3405,19 @@ root.destroy()
 
     async def exit_focus_mode(self):
         """Exit Focus Mode — restore original timeframe UI and reload data."""
-        self.focus_mode_active = False
+        self.state.focus_mode_active = False
         
         # Swap out the UI and clear the animation so it can trigger next time
         self.focus_token.classes(add='hidden', remove='animate-bloom')
         self.timeframe_select.classes(remove='hidden')
         
         # Guard flag prevents on_filter_change from immediately looping
-        self._entering_focus_mode = True
+        self.state.entering_focus_mode = True
         self.timeframe_select.value = self.pre_focus_timeframe
-        self._entering_focus_mode = False
+        self.state.entering_focus_mode = False
         
         # Update timeframe and reload data
-        self.current_timeframe = self.pre_focus_timeframe
+        self.state.timeframe = self.pre_focus_timeframe
         await self.refresh_data_view()
         ui.notify("Exited Focus Mode", type='info', icon='zoom_out')
 
@@ -4408,12 +3505,12 @@ root.destroy()
         Refresh data using DB-side sorting.
         """
         # [Keep existing sorting logic...]
-        sort_order = 'desc' if self.current_sort_desc else 'asc'
+        sort_order = 'desc' if self.state.sort_desc else 'asc'
 
         self.activities_data = self.db.get_activities(
-            self.current_timeframe, 
-            self.current_session_id,
-            sort_by=self.current_sort_by,
+            self.state.timeframe, 
+            self.state.session_id,
+            sort_by=self.state.sort_by,
             sort_order=sort_order
         )
         
@@ -4429,11 +3526,17 @@ root.destroy()
         self.update_filter_bar() # <--- ADD THIS LINE
         self.update_trends_chart() 
         
-        # Toggle buttons
+        # Toggle buttons and LLM safety lock
         has_data = bool(self.activities_data)
         if has_data:
             self.export_btn.props(remove='disable')
-            self.copy_btn.style('opacity: 1; pointer-events: auto; cursor: pointer;')
+            # LLM Safety Lock: large timeframes contain too much data for an LLM context window
+            if self.state.timeframe in ('All Time', 'This Year'):
+                self.copy_btn.style('opacity: 0.5; pointer-events: none;')
+                self.copy_btn_label.text = 'Too much data for LLM'
+            else:
+                self.copy_btn.style('opacity: 1; pointer-events: auto; cursor: pointer;')
+                self.copy_btn_label.text = 'COPY FOR AI'
         else:
             self.export_btn.props(add='disable')
             self.copy_btn.style('opacity: 0.5; pointer-events: none;')
@@ -4457,40 +3560,26 @@ root.destroy()
     # Placeholder methods for handlers (to be implemented in later tasks)
     async def on_filter_change(self, e):
         """
-        Handle timeframe filter changes.
-        
-        This method:
-        - Updates current_timeframe state variable
-        - Calls refresh_data_view() to update all views with filtered data
-        - Implements LLM safety lock for large datasets
-        
-        Requirements: 11.1, 11.7
+        Handle timeframe filter changes from the dropdown.
+
+        Writing self.state.timeframe automatically triggers refresh_data_view
+        via the subscriber registered in __init__.  This method only handles
+        side-effects that are tightly bound to the *user gesture* itself
+        (focus mode cleanup, UI class swaps).
         """
-        # Guard: skip if we're programmatically setting focus mode value
-        if self._entering_focus_mode:
+        # Guard: skip if we're programmatically setting the select during focus mode transitions
+        if self.state.entering_focus_mode:
             return
-        
-        # If we're in focus mode and user picks a DIFFERENT timeframe via some other UI flow, exit focus mode
-        if self.focus_mode_active and not str(e.value).startswith('🎯'):
-            self.focus_mode_active = False
+
+        # If we're in focus mode and user picks a DIFFERENT timeframe, exit focus mode cleanly
+        if self.state.focus_mode_active and not str(e.value).startswith('🎯'):
+            self.state.focus_mode_active = False
             self.focus_token.classes(add='hidden')
             self.timeframe_select.classes(remove='hidden')
-        
-        # Update current timeframe state from the dropdown value
-        self.current_timeframe = e.value
-        
-        # Refresh all data views with the new filter
-        await self.refresh_data_view()
-        
-        # LLM Safety Lock: Disable copy button for large datasets
-        if self.current_timeframe in ["All Time", "This Year"]:
-            self.copy_btn.style('opacity: 0.5; pointer-events: none;')
-            self.copy_btn_label.text = 'Too much data for LLM'
-        else:
-            # Only enable if we have data
-            if self.activities_data:
-                self.copy_btn.style('opacity: 1; pointer-events: auto; cursor: pointer;')
-            self.copy_btn_label.text = 'COPY FOR AI'
+
+        # Writing timeframe fires the subscriber which schedules refresh_data_view.
+        # The LLM safety lock is applied inside refresh_data_view itself.
+        self.state.timeframe = e.value
     
     @staticmethod
     def hex_to_rgb(hex_color):
@@ -4555,20 +3644,20 @@ root.destroy()
                 strain = int(moving_time_min * factor)
                 
                 if strain < 75:
-                    strain_label, strain_color, strain_text_color = "Recovery", "#60a5fa", "#60a5fa" # Blue
+                    strain_label, strain_color, strain_text_color = LOAD_CATEGORY.RECOVERY, LOAD_CATEGORY_COLORS[LOAD_CATEGORY.RECOVERY], LOAD_CATEGORY_COLORS[LOAD_CATEGORY.RECOVERY]
                 elif strain < 150:
-                    strain_label, strain_color, strain_text_color = "Base", "#10B981", "#10B981" # Green
+                    strain_label, strain_color, strain_text_color = LOAD_CATEGORY.BASE, LOAD_CATEGORY_COLORS[LOAD_CATEGORY.BASE], LOAD_CATEGORY_COLORS[LOAD_CATEGORY.BASE]
                 elif strain < 300:
-                    strain_label, strain_color, strain_text_color = "Productive", "#f97316", "#f97316" # Orange
+                    strain_label, strain_color, strain_text_color = LOAD_CATEGORY.OVERLOAD, LOAD_CATEGORY_COLORS[LOAD_CATEGORY.OVERLOAD], LOAD_CATEGORY_COLORS[LOAD_CATEGORY.OVERLOAD]
                 else:
-                    strain_label, strain_color, strain_text_color = "Overreaching", "#ef4444", "#ef4444" # Red
+                    strain_label, strain_color, strain_text_color = LOAD_CATEGORY.OVERREACHING, LOAD_CATEGORY_COLORS[LOAD_CATEGORY.OVERREACHING], LOAD_CATEGORY_COLORS[LOAD_CATEGORY.OVERREACHING]
                 
                 # 4. Create the "Hot Card" with Dark Glass styling
                 # Generate CSS variables for this specific card's theme
                 
                 # Helper to convert hex to rgba-like string for our CSS variables
                 # Note: We are constructing the hex+alpha strings directly as requested
-                # Productive (#f97316) -> BG: #f9731626, Border: #f973164D, etc.
+                # Helper to convert hex to rgba-like string for our CSS variables
                 
                 strain_bg = f"{strain_color}26"          # 15%
                 strain_border = f"{strain_color}4D"      # 30%
@@ -4806,18 +3895,18 @@ A sign your body is struggling to recover from recent hard training.
     def show_volume_info(self, highlight_verdict=None):
         """
         Show informational modal about the current Volume lens.
-        Content adapts based on self.volume_lens and highlights the active verdict.
+        Content adapts based on self.state.volume_lens and highlights the active verdict.
         """
         current_verdict = highlight_verdict
         if not current_verdict and hasattr(self, 'volume_verdict_label'):
             current_verdict = getattr(self.volume_verdict_label, 'text', None)
 
         if not current_verdict:
-            if self.volume_lens == 'mix':
+            if self.state.volume_lens == 'mix':
                 current_verdict, _, _ = self.calculate_mix_verdict()
-            elif self.volume_lens == 'load':
+            elif self.state.volume_lens == 'load':
                 current_verdict, _, _ = self.calculate_load_verdict()
-            elif self.volume_lens == 'zones':
+            elif self.state.volume_lens == 'zones':
                 current_verdict, _, _ = self.calculate_hr_zones_verdict()
             else:
                 current_verdict, _, _ = self.calculate_volume_verdict()
@@ -4837,7 +3926,7 @@ A sign your body is struggling to recover from recent hard training.
                     return f'background: {base_color}2A; border: 2px solid {base_color}90;', text_color
                 return f'background: {base_color}14; border: 1px solid {base_color}40;', text_color
 
-            if self.volume_lens == 'quality':
+            if self.state.volume_lens == 'quality':
                 ui.label('Volume Quality Analysis').classes('text-xl font-bold text-white mb-2')
                 with ui.column().classes('gap-4'):
                     s, t = style_card('High Quality Miles', '#10b981', 'text-emerald-400')
@@ -4869,7 +3958,7 @@ A sign your body is struggling to recover from recent hard training.
                     ui.label('How we decide:').classes('text-xs font-bold text-zinc-500 uppercase tracking-wider')
                     ui.label('We analyze every single mile split against Terrain, Metabolic Cost, and Mechanics.').classes('text-sm text-zinc-400')
 
-            elif self.volume_lens == 'mix':
+            elif self.state.volume_lens == 'mix':
                 ui.label('Training Mix Analysis').classes('text-xl font-bold text-white mb-2')
                 ui.label('Shows how your weekly mileage breaks down by run type (Easy, Tempo, Hard). Your verdict reflects the balance:').classes('text-sm text-zinc-400 mb-4')
                 with ui.column().classes('gap-4'):
@@ -4901,7 +3990,7 @@ A sign your body is struggling to recover from recent hard training.
                             ui.label('MONOTONE').classes(f'text-sm font-bold {t}')
                         ui.label('Nearly all your miles are the same type. Add variety — even one tempo or interval session per week creates a stronger training stimulus.').classes('text-sm text-zinc-300')
 
-            elif self.volume_lens == 'load':
+            elif self.state.volume_lens == 'load':
                 ui.label('Training Load Analysis').classes('text-xl font-bold text-white mb-2')
                 ui.label('Each bar shows your weekly mileage broken down by training stress. Strain is calculated from duration, intensity, and heart rate for each run:').classes('text-sm text-zinc-400 mb-4')
                 with ui.column().classes('gap-4'):
@@ -4933,7 +4022,7 @@ A sign your body is struggling to recover from recent hard training.
                             ui.label('OVERREACHING').classes(f'text-sm font-bold {t}')
                         ui.label('Too many high-stress sessions. An occasional spike is fine, but repeated overreaching leads to injury and staleness. Follow with an easy week.').classes('text-sm text-zinc-300')
 
-            elif self.volume_lens == 'zones':
+            elif self.state.volume_lens == 'zones':
                 ui.label('Heart Rate Zones Analysis').classes('text-xl font-bold text-white mb-2')
                 ui.label('Shows weekly time distribution across heart rate zones. The 80/20 rule says ~80% of training should be easy (Zone 1-2) and ~20% hard (Zone 4-5):').classes('text-sm text-zinc-400 mb-4')
 
@@ -5363,7 +4452,7 @@ Lower is better (<5% is solid). Your heart is working harder to maintain the sam
                 
                 with ui.row().classes('items-start no-wrap gap-2'):
                     ui.label('🟠').classes('text-lg leading-none mt-0.5')
-                    ui.html('<b>Productive (150-300):</b> Hard work that builds fitness and improves performance.').classes('text-sm text-orange-400 leading-snug')
+                    ui.html('<b>Overload (150-300):</b> Hard work that builds fitness and improves performance.').classes('text-sm text-orange-400 leading-snug')
                 
                 with ui.row().classes('items-start no-wrap gap-2'):
                     ui.label('🔴').classes('text-lg leading-none mt-0.5')
@@ -5371,10 +4460,10 @@ Lower is better (<5% is solid). Your heart is working harder to maintain the sam
             
             ui.markdown('''
 **How to Use It:**  
-Track your weekly load to balance hard training with recovery. Consistent productive loads build fitness, while too many overreaching sessions can lead to burnout.
+Track your weekly load to balance hard training with recovery. Consistent overload builds fitness, while too many overreaching sessions can lead to burnout.
 
 **Training Tip:**  
-Most of your runs should be Recovery or Base, with Productive efforts 1-2x per week, and Overreaching reserved for key workouts or races.
+Most of your runs should be Recovery or Base, with Overload efforts 1-2x per week, and Overreaching reserved for key workouts or races.
             ''').classes('text-sm text-gray-300 mb-4')
             
             # Close button
@@ -5605,9 +4694,9 @@ Activity Breakdown: {activity_breakdown}
                     with ui.row().classes('bg-zinc-900 border border-zinc-800 p-1 rounded-lg gap-1'):
                         for f in dist_filters:
                             if f['id'] == 'all':
-                                is_active = not any(k in self.active_filters for k in ['short', 'med', 'long_dist'])
+                                is_active = not any(k in self.state.active_filters for k in ['short', 'med', 'long_dist'])
                             else:
-                                is_active = f['id'] in self.active_filters
+                                is_active = f['id'] in self.state.active_filters
                             
                             if is_active:
                                 classes = "bg-zinc-800 text-white shadow-lg shadow-zinc-900/50 border border-zinc-700 font-bold"
@@ -5627,7 +4716,7 @@ Activity Breakdown: {activity_breakdown}
                         config = self.TAG_CONFIG.get(tag_name, {'icon': '🏷️', 'color': 'zinc'})
                         color = config['color']
                         label = tag_name if any(c in tag_name for c in ['🏃','🔥','⚡','⛰️','🧘','🔷']) else f"{config['icon']} {tag_name}"
-                        is_active = tag_name in self.active_filters
+                        is_active = tag_name in self.state.active_filters
                         
                         if is_active:
                             classes = f"filter-active bg-{color}-500 text-white shadow-md border border-{color}-600/20 transform scale-105"
@@ -5649,7 +4738,7 @@ Activity Breakdown: {activity_breakdown}
                         elif 'ANAEROBIC' in tag_name: color = 'orange'
                         elif 'THRESHOLD' in tag_name: color = 'amber'
                         
-                        is_active = tag_name in self.active_filters
+                        is_active = tag_name in self.state.active_filters
 
                         if is_active:
                             classes = f"filter-active bg-{color}-500 text-white shadow-md border border-{color}-600/20"
@@ -5669,23 +4758,23 @@ Activity Breakdown: {activity_breakdown}
         # 1. Handle Distance Mutex
         if filter_id == 'all':
             # CLEAR all distance filters
-            self.active_filters -= dist_keys
+            self.state.active_filters -= dist_keys
             
         elif filter_id in dist_keys:
             # If clicking the ACTIVE distance filter -> Do nothing (enforce one selection)
             # OR allow toggling off to go back to "All"
-            if filter_id in self.active_filters:
-                self.active_filters.remove(filter_id) # Clicking active -> goes to 'All'
+            if filter_id in self.state.active_filters:
+                self.state.active_filters.remove(filter_id) # Clicking active -> goes to 'All'
             else:
-                self.active_filters -= dist_keys # Clear others
-                self.active_filters.add(filter_id) # Set new
+                self.state.active_filters -= dist_keys # Clear others
+                self.state.active_filters.add(filter_id) # Set new
         
         # 2. Handle Tags (Standard Toggle) - No changes here
         else:
-            if filter_id in self.active_filters:
-                self.active_filters.remove(filter_id)
+            if filter_id in self.state.active_filters:
+                self.state.active_filters.remove(filter_id)
             else:
-                self.active_filters.add(filter_id)
+                self.state.active_filters.add(filter_id)
         
         self.update_filter_bar() 
         self.update_activities_grid()
@@ -5725,13 +4814,13 @@ Activity Breakdown: {activity_breakdown}
                 
                 # Filter Check
                 include = True
-                if self.active_filters:
+                if self.state.active_filters:
                     dist_keys = {'short', 'med', 'long_dist', 'all'}
-                    active_tag_filters = {f for f in self.active_filters if f not in dist_keys}
+                    active_tag_filters = {f for f in self.state.active_filters if f not in dist_keys}
                     
-                    if 'short' in self.active_filters and not (dist < 5): include = False
-                    if 'med' in self.active_filters and not (5 <= dist <= 10): include = False
-                    if 'long_dist' in self.active_filters and not (dist > 10): include = False
+                    if 'short' in self.state.active_filters and not (dist < 5): include = False
+                    if 'med' in self.state.active_filters and not (5 <= dist <= 10): include = False
+                    if 'long_dist' in self.state.active_filters and not (dist > 10): include = False
                     
                     if active_tag_filters and not active_tag_filters.issubset(run_tags_set): 
                         include = False
@@ -5840,7 +4929,7 @@ Activity Breakdown: {activity_breakdown}
                     rows=rows, 
                     row_key='id',       # Matches our STABLE ID
                     selection='multiple',
-                    pagination={'rowsPerPage': 0, 'sortBy': self.current_sort_by, 'descending': self.current_sort_desc},
+                    pagination={'rowsPerPage': 0, 'sortBy': self.state.sort_by, 'descending': self.state.sort_desc},
                     on_select=on_selection,
                 ).classes('w-full h-full text-sm sticky-header-table')
                 self.activities_table = table  # Store ref for selection clearing
@@ -5909,8 +4998,8 @@ Activity Breakdown: {activity_breakdown}
         
         # 2. Update App State
         if new_sort_by:
-            self.current_sort_by = new_sort_by
-            self.current_sort_desc = new_descending
+            self.state.sort_by = new_sort_by
+            self.state.sort_desc = new_descending
             
             # 3. Reload Data (Server-Side Sort)
             await self.refresh_data_view()
@@ -6423,10 +5512,10 @@ Activity Breakdown: {activity_breakdown}
             act_date_str = date_obj.strftime('%-m/%-d')
             
             strain = self._calculate_strain(activity)
-            if strain < 75: load_cat = 'Recovery'
-            elif strain < 150: load_cat = 'Base'
-            elif strain < 300: load_cat = 'Productive'
-            else: load_cat = 'Overreaching'
+            if strain < 75:   load_cat = LOAD_CATEGORY.RECOVERY
+            elif strain < 150: load_cat = LOAD_CATEGORY.BASE
+            elif strain < 300: load_cat = LOAD_CATEGORY.OVERLOAD
+            else:              load_cat = LOAD_CATEGORY.OVERREACHING
             
             load_data.append({
                 'week_start': week_start, 'distance': dist, 'category': load_cat,
@@ -6438,20 +5527,10 @@ Activity Breakdown: {activity_breakdown}
         
         df_load = pd.DataFrame(load_data)
         
-        # Colors match feed card Load colors for consistency
-        categories = ['Recovery', 'Base', 'Productive', 'Overreaching']
-        colors = {
-            'Recovery':     '#60a5fa',  # Blue — matches feed card
-            'Base':         '#10B981',  # Green — matches feed card
-            'Productive':   '#f97316',  # Orange — matches feed card
-            'Overreaching': '#ef4444',  # Red — matches feed card
-        }
-        descriptions = {
-            'Recovery':     'Low stress, promotes adaptation',
-            'Base':         'Steady load, maintains fitness',
-            'Productive':   'Hard effort, builds fitness',
-            'Overreaching': 'Very high stress, needs recovery',
-        }
+        # Colors and descriptions pulled from constants for consistency
+        categories = list(LOAD_CATEGORY.ALL)
+        colors = LOAD_CATEGORY_COLORS
+        descriptions = LOAD_CATEGORY_DESCRIPTIONS
         
         grouped = df_load.groupby(['week_start', 'category'])
         weeks = sorted(df_load['week_start'].unique())
@@ -6566,7 +5645,7 @@ Activity Breakdown: {activity_breakdown}
     def calculate_load_verdict(self, df=None, start_index=None, end_index=None):
         """Calculate load verdict from visible stacked-bar mileage (distance-weighted)."""
         try:
-            categories = ['Recovery', 'Base', 'Productive', 'Overreaching']
+            categories = list(LOAD_CATEGORY.ALL)
             data = self._slice_lens_weekly_data(self.weekly_load_data, start_index, end_index)
             if data is None or data.empty:
                 return 'N/A', '#71717a', 'bg-zinc-700'
@@ -6579,34 +5658,34 @@ Activity Breakdown: {activity_breakdown}
             if total_miles <= 0:
                 return 'N/A', '#71717a', 'bg-zinc-700'
 
-            recovery = data['Recovery'].sum()
-            base_load = data['Base'].sum()
-            productive = data['Productive'].sum()
-            overreaching = data['Overreaching'].sum()
+            recovery    = data[LOAD_CATEGORY.RECOVERY].sum()
+            base_load   = data[LOAD_CATEGORY.BASE].sum()
+            overload    = data[LOAD_CATEGORY.OVERLOAD].sum()
+            overreaching = data[LOAD_CATEGORY.OVERREACHING].sum()
 
-            recovery_pct = (recovery / total_miles) * 100
-            base_pct = (base_load / total_miles) * 100
-            productive_pct = (productive / total_miles) * 100
+            recovery_pct  = (recovery    / total_miles) * 100
+            base_pct      = (base_load   / total_miles) * 100
+            overload_pct  = (overload    / total_miles) * 100
             overreach_pct = (overreaching / total_miles) * 100
             easy_pct = recovery_pct + base_pct
 
             if (
                 overreach_pct >= 20
-                and overreach_pct >= productive_pct
+                and overreach_pct >= overload_pct
                 and overreach_pct >= base_pct
                 and overreach_pct >= recovery_pct
             ):
                 return 'OVERREACHING', '#ef4444', 'bg-red-500/20'
 
             if (
-                productive_pct >= 20
-                and productive_pct >= base_pct
-                and productive_pct >= recovery_pct
-                and productive_pct >= overreach_pct
+                overload_pct >= 20
+                and overload_pct >= base_pct
+                and overload_pct >= recovery_pct
+                and overload_pct >= overreach_pct
             ):
-                return 'PRODUCTIVE', '#f97316', 'bg-orange-500/20'
+                return 'OVERLOAD', '#f97316', 'bg-orange-500/20'
 
-            if easy_pct >= 85 and productive_pct < 8 and overreach_pct < 5:
+            if easy_pct >= 85 and overload_pct < 8 and overreach_pct < 5:
                 return 'UNDERTRAINED', '#3b82f6', 'bg-blue-500/20'
 
             return 'BASE', '#10b981', 'bg-emerald-500/20'
@@ -6857,15 +5936,15 @@ Activity Breakdown: {activity_breakdown}
 
     def get_active_volume_lens_state(self):
         """Return chart + metadata for the currently selected Training Volume lens."""
-        if self.volume_lens == 'mix':
+        if self.state.volume_lens == 'mix':
             fig = self.generate_training_mix_chart()
             verdict, v_color, v_bg = self.calculate_mix_verdict(self.df)
             subtitle = 'Weekly distribution by run type'
-        elif self.volume_lens == 'load':
+        elif self.state.volume_lens == 'load':
             fig = self.generate_load_chart()
             verdict, v_color, v_bg = self.calculate_load_verdict(self.df)
             subtitle = 'Weekly distribution by training stress'
-        elif self.volume_lens == 'zones':
+        elif self.state.volume_lens == 'zones':
             fig = self.generate_hr_zones_chart()
             verdict, v_color, v_bg = self.calculate_hr_zones_verdict(self.df)
             subtitle = 'Weekly time in each heart rate zone'
@@ -6884,7 +5963,7 @@ Activity Breakdown: {activity_breakdown}
             'load': 'Load',
             'mix': 'Training Mix',
         }
-        return lens_labels.get(self.volume_lens, 'Quality')
+        return lens_labels.get(self.state.volume_lens, 'Quality')
 
     def apply_export_chart_header(self, fig, title, subtitle, verdict=None, badge_color=None, margin=None):
         """Apply static export header with optional inline-styled verdict badge."""
@@ -7813,7 +6892,7 @@ Activity Breakdown: {activity_breakdown}
                         
                         # === SEGMENTED TOGGLE (Pill Group) ===
                         def switch_lens(lens):
-                            self.volume_lens = lens
+                            self.state.volume_lens = lens
                             # Update button styles
                             for l, btn in self._lens_buttons.items():
                                 if l == lens:
@@ -7827,7 +6906,7 @@ Activity Breakdown: {activity_breakdown}
                         self._lens_buttons = {}
                         with ui.row().classes('w-full gap-1 mb-4 p-1 bg-zinc-800/50 rounded-full').style('width: fit-content;'):
                             for lens_key, lens_label in [('quality', 'Quality'), ('zones', 'HR Zones'), ('load', 'Load'), ('mix', 'Training Mix')]:
-                                is_active = self.volume_lens == lens_key
+                                is_active = self.state.volume_lens == lens_key
                                 btn = ui.button(lens_label, on_click=lambda lk=lens_key: switch_lens(lk)).props('flat no-caps')
                                 if is_active:
                                     btn.classes('text-sm px-4 py-1.5 rounded-full font-medium transition-all duration-200 bg-zinc-700 text-white')
@@ -8058,17 +7137,17 @@ Activity Breakdown: {activity_breakdown}
             has_zoom_range = idx_start is not None and idx_end is not None
 
             # Determine the correct verdict calculator based on current lens
-            if self.volume_lens == 'mix':
+            if self.state.volume_lens == 'mix':
                 if has_zoom_range:
                     vol_verdict, vol_color, vol_bg = self.calculate_mix_verdict(start_index=idx_start, end_index=idx_end)
                 else:
                     vol_verdict, vol_color, vol_bg = self.calculate_mix_verdict()
-            elif self.volume_lens == 'load':
+            elif self.state.volume_lens == 'load':
                 if has_zoom_range:
                     vol_verdict, vol_color, vol_bg = self.calculate_load_verdict(start_index=idx_start, end_index=idx_end)
                 else:
                     vol_verdict, vol_color, vol_bg = self.calculate_load_verdict()
-            elif self.volume_lens == 'zones':
+            elif self.state.volume_lens == 'zones':
                 if has_zoom_range:
                     vol_verdict, vol_color, vol_bg = self.calculate_hr_zones_verdict(start_index=idx_start, end_index=idx_end)
                 else:
@@ -8317,7 +7396,7 @@ TRAINING LOAD (load_score):
 - TRIMP-style internal load score (duration x HR intensity)
 - < 75: Recovery / Easy
 - 75-150: Base / Aerobic
-- 150-300: Productive / Hard
+- 150-300: Overload / Hard
 - > 300: Overreaching / Extreme
 
 TIME IN ZONES (zone1_mins ... zone5_mins):
@@ -8538,10 +7617,10 @@ TIME IN ZONES (zone1_mins ... zone5_mins):
                 'Tempo':    ('Tempo Miles',    '#f43f5e', 'bg-rose-500/20'),
                 
                 # Load Lens
-                'Base':         ('Base',         '#10B981', 'bg-emerald-500/20'),
-                'Productive':   ('Productive',   '#f97316', 'bg-orange-500/20'),
-                'Overreaching': ('Overreaching', '#ef4444', 'bg-red-500/20'),
-                # 'Recovery' is shared with Mix but needs consistent styling
+                'Base':         ('Base',         LOAD_CATEGORY_COLORS['Base'],         'bg-emerald-500/20'),
+                'Overload':     ('Overload',     LOAD_CATEGORY_COLORS['Overload'],     'bg-orange-500/20'),
+                'Overreaching': ('Overreaching', LOAD_CATEGORY_COLORS['Overreaching'], 'bg-red-500/20'),
+                # 'Recovery' is shared with Mix but consistent color from LOAD_CATEGORY_COLORS
                 
                 # HR Zones Lens
                 'Zone 1': ('Zone 1 (Easy)',      '#60a5fa', 'bg-blue-500/20'),
@@ -8923,7 +8002,7 @@ TRAINING LOAD:
 - Quantifies total physiological stress (duration x HR intensity)
 - <75: Recovery / Easy
 - 75-150: Base / Aerobic
-- 150-300: Productive / Hard
+- 150-300: Overload / Hard
 - >300: Overreaching / Extreme
 
 TRAINING ZONES:

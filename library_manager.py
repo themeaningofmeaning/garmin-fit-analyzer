@@ -91,6 +91,7 @@ class SyncReport:
     unchanged: int = 0
     missing_files: int = 0
     failed: int = 0
+    skipped_unsupported: int = 0  # Sport-guard rejections (cycling, swimming, etc.) – not errors
     reprocessed_upgraded: int = 0
     reprocess_failed: int = 0
     reprocess_missing_source: int = 0
@@ -462,6 +463,7 @@ class LibraryManager:
 
                 report.finished_at = self._utc_now_iso()
                 final_status = "error" if (report.failed > 0 or report.errors) else "ok"
+                # Note: skipped_unsupported files do NOT constitute an error.
                 self._finalize_sync(report, final_status=final_status)
                 return report
             except Exception as exc:
@@ -559,6 +561,20 @@ class LibraryManager:
                     report.imported_new += 1
                     return content_hash
 
+                if ingest_ok is None:
+                    # Sport-guard skip (cycling, swimming, etc.) — not a failure.
+                    # Mark as 'imported' so this hash is not re-attempted on every sync.
+                    self._mark_imported(
+                        content_hash=content_hash,
+                        file_path=normalized_path,
+                        file_size_bytes=stat_result.st_size,
+                        file_mtime_ns=stat_result.st_mtime_ns,
+                        reason=reason,
+                        source_type=source_type,
+                    )
+                    report.skipped_unsupported += 1
+                    return None
+
                 report.failed += 1
                 error_text = ingest_error or "Unknown ingest error."
                 self._mark_failed(
@@ -590,6 +606,18 @@ class LibraryManager:
                 self._update_activity_file_path(content_hash, normalized_path)
                 report.imported_new += 1
                 return content_hash
+
+            if ingest_ok is None:
+                self._mark_imported(
+                    content_hash=content_hash,
+                    file_path=normalized_path,
+                    file_size_bytes=stat_result.st_size,
+                    file_mtime_ns=stat_result.st_mtime_ns,
+                    reason=reason,
+                    source_type=source_type,
+                )
+                report.skipped_unsupported += 1
+                return None
 
             report.failed += 1
             error_text = ingest_error or "Unknown ingest error."
@@ -631,6 +659,18 @@ class LibraryManager:
             report.imported_new += 1
             return content_hash
 
+        if ingest_ok is None:
+            self._mark_imported(
+                content_hash=content_hash,
+                file_path=normalized_path,
+                file_size_bytes=stat_result.st_size,
+                file_mtime_ns=stat_result.st_mtime_ns,
+                reason=reason,
+                source_type=source_type,
+            )
+            report.skipped_unsupported += 1
+            return None
+
         report.failed += 1
         error_text = ingest_error or "Unknown ingest error."
         self._mark_failed(
@@ -645,11 +685,17 @@ class LibraryManager:
         report.errors.append("{0}: {1}".format(normalized_path, error_text))
         return None
 
-    async def _ingest_file(self, file_path: str, content_hash: str, session_id: int) -> Tuple[bool, str]:
+    # Sentinel returned by _ingest_file when the sport-guard cleanly skipped
+    # a non-running activity. Distinct from (False, error) which indicates a
+    # genuine parse failure.
+    _INGEST_SKIPPED: Tuple = (None, "")
+
+    async def _ingest_file(self, file_path: str, content_hash: str, session_id: int) -> Tuple:
         try:
             result = await asyncio.to_thread(self.analyzer.analyze_file, file_path)
-            if not result:
-                return False, "Analyzer returned no activity data."
+            if result is None:
+                # Sport-guard returned None — not a failure, just an unsupported sport.
+                return self._INGEST_SKIPPED
             self.db.insert_activity(result, content_hash, session_id, file_path)
             return True, ""
         except Exception as exc:
